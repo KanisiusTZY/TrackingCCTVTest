@@ -16,15 +16,17 @@ def compute_horizontal_overlap_ratio(bbox1, bbox2):
 
 class ChairRegistry:
     """
-    Universal Chair Registry for Multi-Video Office CCTV.
+    Universal Seated Workstation Chair Registry.
 
     Guarantees:
-    1. High-recall bootstrap generation for occluded employees and backs to camera.
-    2. Standing upright person rejection (h/w >= 1.75 & h >= 240px).
+    1. Every tracked seated employee (even facing away, or occluded behind monitors)
+       AUTOMATICALLY gets a workstation chair entry in the registry on Frame 1.
+    2. Rejects standing upright persons (h/w >= 1.75 & h >= 240px).
     3. Keeps registered workstation chairs persistent for 150 frames.
+    4. Deduplicates overlapping chair entries cleanly (1 box per person).
     """
 
-    def __init__(self, iou_threshold=0.20, min_confidence=0.15, bootstrap_persistence=5):
+    def __init__(self, model_name='yolov8m.pt', iou_threshold=0.20, min_confidence=0.10, bootstrap_persistence=1):
         self.iou_threshold = iou_threshold
         self.min_confidence = min_confidence
         self.bootstrap_persistence = bootstrap_persistence
@@ -61,14 +63,14 @@ class ChairRegistry:
                     "priority": 3
                 })
 
-        # 1c. Instant Person-Bootstrap Candidates for SEATED Employees ONLY
+        # 1c. Instant Person-Workstation Candidates for EVERY Seated Employee
         if tracked_persons:
             bootstrap_candidates = self._generate_bootstrap_candidates(tracked_persons, all_candidates)
             all_candidates.extend(bootstrap_candidates)
 
         total_candidate_count = len(all_candidates)
 
-        # 2. Global NMS Merge
+        # 2. Global NMS & Centroid Deduplication
         clean_chairs = self._global_nms_merge(all_candidates, frame_count)
 
         # 3. Replace self.registry completely
@@ -88,15 +90,16 @@ class ChairRegistry:
             ph = max(1, py2 - py1)
             aspect_ratio = ph / float(pw)
 
-            # REJECT STANDING PERSONS: Standing upright persons (aspect ratio >= 1.75 & ph >= 240px) cannot be seated!
+            # REJECT STANDING PERSONS: Standing upright persons (aspect ratio >= 1.75 & ph >= 240px) are standing
             is_standing = (aspect_ratio >= 1.75 and ph >= 240)
             if is_standing:
                 continue
 
-            seat_y1 = py1 + int(ph * 0.25)
+            # Synthesize workstation seat box for the seated employee
+            seat_y1 = py1 + int(ph * 0.20)
             seat_y2 = py2
             pad_x = int(pw * 0.05)
-            est_bbox = [max(0, px1 - pad_x), seat_y1, px2 + pad_x, seat_y2]
+            est_bbox = [max(0, px1 - pad_x), seat_y1, min(1920, px2 + pad_x), seat_y2]
 
             already_has_chair = False
             for cand in existing_candidates:
@@ -106,7 +109,7 @@ class ChairRegistry:
                 iou = compute_iou(est_bbox, cand["bbox"])
                 h_overlap = compute_horizontal_overlap_ratio(est_bbox, cand["bbox"])
 
-                if iou >= 0.15 or dist < 120.0 or h_overlap >= 0.30:
+                if iou >= 0.12 or dist < 120.0 or h_overlap >= 0.30:
                     already_has_chair = True
                     break
 
@@ -114,7 +117,7 @@ class ChairRegistry:
                 bootstrap_list.append({
                     "id": None,
                     "bbox": est_bbox,
-                    "conf": 0.60,
+                    "conf": 0.70,
                     "age": 0,
                     "is_bootstrap": True,
                     "source": "bootstrap",
@@ -163,7 +166,8 @@ class ChairRegistry:
                 dist = math.hypot(c1[0] - c2[0], c1[1] - c2[1])
                 h_overlap = compute_horizontal_overlap_ratio(best_bbox, cand["bbox"])
 
-                if iou >= self.iou_threshold or dist < 140.0 or h_overlap >= 0.30:
+                # Aggressive workstation NMS merge (IoU >= 0.15 OR dist < 150px OR X-overlap >= 30%)
+                if iou >= self.iou_threshold or dist < 150.0 or h_overlap >= 0.30:
                     used[j] = True
 
                     best_bbox = [

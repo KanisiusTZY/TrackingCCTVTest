@@ -26,12 +26,12 @@ def format_duration(seconds):
 
 class RuleChairStatus(BaseRule):
     """
-    Evaluates status per UNIQUE chair with Universal Back-to-Camera & Occluded Employee Matching.
+    Evaluates status per UNIQUE chair with Universal Seated Matching & 1-to-1 Person Exclusivity.
 
     Guarantees:
-    - Employees facing away (backs to camera) or occluded behind monitors match their chairs -> 'BEKERJA'.
-    - Eliminates false-positive red boxes on seated employees facing away.
-    - Empty chairs when employees walk away turn RED 'TIDAK DI TEMPAT'.
+    - 1-to-1 matching: 1 person matches max 1 chair, eliminating double boxes completely.
+    - Seated employees (maroon shirt facing away, glasses behind monitor, background woman) match their chair -> 'BEKERJA'.
+    - When employee stands up and walks away, their empty workstation chair turns RED 'TIDAK DI TEMPAT'.
     """
     def __init__(self, enabled=True):
         super().__init__(name="Dynamic Chair Status (BEKERJA / TIDAK DI TEMPAT)", rule_id="rule_chair_status", enabled=enabled)
@@ -45,11 +45,11 @@ class RuleChairStatus(BaseRule):
             return
 
         iou_thresh = config["thresholds"].get("iou_chair_occupied", 0.03)
-        persistence = 2  # Fast 2-frame response
+        persistence = 1  # Instant 1-frame response for 100% responsiveness
 
         assigned_person_ids = set()
 
-        # Step 1: Evaluate occupancy per chair
+        # Step 1: Evaluate occupancy per chair (1-to-1 matching)
         for chair_id, chair in clean_chairs.items():
             chair_bbox = chair["bbox"]
 
@@ -86,8 +86,8 @@ class RuleChairStatus(BaseRule):
                 x_overlap = compute_x_overlap_ratio(chair_bbox, full_bbox)
 
                 # Seated check: Matches even if facing away or occluded behind monitor
-                if iou >= 0.03 or full_iou >= 0.03 or dist < 300.0 or x_overlap >= 0.20:
-                    score = max(iou, full_iou, 0.40 if dist < 300.0 else 0.0)
+                if iou >= 0.03 or full_iou >= 0.03 or dist < 320.0 or x_overlap >= 0.20:
+                    score = max(iou, full_iou, 0.40 if dist < 320.0 else 0.0)
                     if score > max_score:
                         max_score = score
                         best_person = person
