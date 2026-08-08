@@ -55,17 +55,15 @@ class Visualizer:
     def __init__(self):
         pass
 
-    def render(self, frame, tracked_objects, rule_engine, fps=0.0):
+    def render(self, frame, registered_chairs, rule_engine, fps=0.0):
         out = frame.copy()
         h, w = out.shape[:2]
-
-        tracked_chairs = tracked_objects.get("chairs", {})
 
         bekerja_count = 0
         away_count = 0
 
-        # Render each detected chair according to status
-        for chair_id, chair in tracked_chairs.items():
+        # Render each chair entry in ChairRegistry
+        for chair_id, chair in registered_chairs.items():
             status = chair.get("status", "TIDAK DI TEMPAT")
 
             if status == "BEKERJA":
@@ -73,7 +71,7 @@ class Visualizer:
                 upper_bbox = chair.get("matched_upper_body_bbox")
                 if upper_bbox is not None:
                     px1, py1, px2, py2 = upper_bbox
-                    # Draw tight green box around upper body
+                    # Tight green box around person upper body
                     draw_corner_box(out, (px1, py1, px2, py2), COLOR_BEKERJA, thickness=2)
                     draw_filled_badge(out, "BEKERJA", (px1, py1), COLOR_BEKERJA, font_scale=0.55)
             else:
@@ -81,7 +79,7 @@ class Visualizer:
                 cx1, cy1, cx2, cy2 = chair["bbox"]
                 away_label = chair.get("away_label", "TIDAK DI TEMPAT")
 
-                # Draw tight red box around empty chair bbox
+                # Tight red box around registered chair position
                 overlay = out.copy()
                 cv2.rectangle(overlay, (cx1, cy1), (cx2, cy2), COLOR_AWAY, -1)
                 cv2.addWeighted(overlay, 0.20, out, 0.80, 0, out)
@@ -96,7 +94,7 @@ class Visualizer:
         cv2.addWeighted(hud_overlay, 0.88, out, 0.12, 0, out)
         cv2.line(out, (0, hud_h), (w, hud_h), (0, 235, 100), 1)
 
-        sys_title = "SKYNET CHAIR MONITORING SYSTEM"
+        sys_title = "SKYNET CHAIR REGISTRY SYSTEM"
         fps_text = f"FPS: {fps:.1f}"
         status_stats = f"BEKERJA: {bekerja_count}  |  TIDAK DI TEMPAT: {away_count}"
 
@@ -105,7 +103,7 @@ class Visualizer:
         cv2.putText(out, status_stats, (480, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (0, 200, 255), 2)
 
         # Bottom Controls Legend Bar
-        legend_str = "STATUS: [GREEN] BEKERJA (Upper Body) | [RED] TIDAK DI TEMPAT (Chair BBox) | [R] Reset Timers | [Q] Quit"
+        legend_str = "STATUS: [GREEN] BEKERJA (Upper Body) | [RED] TIDAK DI TEMPAT (Chair Registry) | [R] Reset Timers | [Q] Quit"
         cv2.putText(out, legend_str, (15, h - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
 
         return out

@@ -9,13 +9,12 @@ class RuleEngine:
             "rule_chair_status": RuleChairStatus(enabled=rules_cfg.get("rule_chair_status", True)),
         }
 
-    def process_all(self, tracked_objects, dt):
+    def process_all(self, tracked_persons, registered_chairs, dt):
         """
-        Runs the dynamic chair status rule on tracked persons and detected chairs.
-        tracked_objects: dict {"persons": {...}, "chairs": {...}}
+        Runs the dynamic chair status rule on tracked persons and permanent registered chairs.
         """
         for rule in self.rules.values():
-            rule.process(tracked_objects, self.config, dt)
+            rule.process(tracked_persons, registered_chairs, self.config, dt)
 
     def toggle_rule(self, rule_id="rule_chair_status"):
         if rule_id in self.rules:

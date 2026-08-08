@@ -4,8 +4,9 @@ import time
 import os
 import argparse
 
-from tracker import MultiCategoryTracker
+from tracker import PersonTracker
 from detectors.person_detector import ObjectDetector
+from detectors.chair_registry import ChairRegistry
 from rules.rule_engine import RuleEngine
 from visualizer import Visualizer
 
@@ -29,7 +30,7 @@ def load_config(config_path="config.json"):
 def main():
     default_src = "p.mp4" if os.path.exists("p.mp4") else "videoplayback.mp4"
 
-    parser = argparse.ArgumentParser(description="Skynet CCTV Dynamic Chair & Upper-Body Monitoring System")
+    parser = argparse.ArgumentParser(description="Skynet CCTV Chair Registry & Upper-Body Monitoring System")
     parser.add_argument("--source", type=str, default=default_src, help=f"Video source file or camera index (default: {default_src})")
     parser.add_argument("--config", type=str, default="config.json", help="Path to config file (default: config.json)")
     parser.add_argument("--output", type=str, default="output_skynet_monitoring.mp4", help="Path to save output video (default: output_skynet_monitoring.mp4)")
@@ -43,10 +44,11 @@ def main():
     thresholds = config.get("thresholds", {})
     upper_body_ratio = thresholds.get("person_upper_body_ratio", 0.55)
 
-    # Initialize detection & tracking components
-    print("[INFO] Initializing Dynamic Chair & Upper-Body Monitoring System...")
+    # Initialize detection, registry & tracking components
+    print("[INFO] Initializing Chair Registry & Upper-Body Monitoring System...")
     detector = ObjectDetector(confidence_threshold=0.20, upper_body_ratio=upper_body_ratio)
-    tracker = MultiCategoryTracker(person_max_disappeared=30, chair_max_disappeared=10)
+    chair_registry = ChairRegistry(min_confidence=0.45, match_iou_threshold=0.35)
+    person_tracker = PersonTracker(max_disappeared=30)
     rule_engine = RuleEngine(config)
     visualizer = Visualizer()
 
@@ -71,7 +73,7 @@ def main():
         video_writer = cv2.VideoWriter(args.output, fourcc, video_fps, (frame_w, frame_h))
         print(f"[INFO] Recording output video to '{args.output}' ({frame_w}x{frame_h} @ {video_fps:.1f} FPS)...")
 
-    window_name = "Dynamic Chair & Upper-Body Monitoring System"
+    window_name = "Chair Registry & Upper-Body Monitoring System"
     if not args.headless:
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
 
@@ -100,14 +102,17 @@ def main():
         # Step 1: Detect persons and chairs
         detections = detector.detect(frame, upper_body_ratio=upper_body_ratio)
 
-        # Step 2: Update multi-category tracker (persons + chairs with last-known bbox persistence)
-        tracked_objects = tracker.update(detections["persons"], detections["chairs"])
+        # Step 2: Update persistent Chair Registry (live high-conf chair detections refine/add entries)
+        registered_chairs = chair_registry.update(detections["chairs"])
 
-        # Step 3: Process dynamic chair status rule
-        rule_engine.process_all(tracked_objects, dt)
+        # Step 3: Update PersonTracker (tracked persons with full-body and upper-body bboxes)
+        tracked_persons = person_tracker.update(detections["persons"])
 
-        # Step 4: Render Visual HUD Overlay
-        output_frame = visualizer.render(frame, tracked_objects, rule_engine, fps=fps)
+        # Step 4: Process occupancy rule against Chair Registry
+        rule_engine.process_all(tracked_persons, registered_chairs, dt)
+
+        # Step 5: Render Visual HUD Overlay
+        output_frame = visualizer.render(frame, registered_chairs, rule_engine, fps=fps)
 
         # Write frame to MP4 output video file
         if video_writer is not None:
