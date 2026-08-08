@@ -4,44 +4,26 @@ from tracker import compute_iou, compute_centroid
 
 class ChairRegistry:
     """
-    TOTAL REWRITE: Global Frame-by-Frame Chair Registry with Per-Frame NMS Cleanup.
+    Refined Chair Registry with Aggressive NMS & Centroid Distance Deduplication.
 
     Guarantees:
-    1. ZERO duplicate entries in the registry at any frame.
-    2. Every frame performs a GLOBAL NMS / Merge across:
-       - Existing persistent registry chairs
-       - Live YOLO chair detections (conf >= 0.40, aspect ratio filtered)
-       - Person-bootstrap chair candidates (stationary persons >= 30 frames without existing chair)
-    3. Replaces self.registry with the deduplicated clean list EVERY FRAME.
-    4. Console debug logging: "[Frame X] Candidates: Y -> After NMS: Z unique chairs"
+    1. Zero overlapping chair boxes (IoU >= 0.20 or Centroid Distance < 120px merged into 1 chair).
+    2. Real YOLO chair detections replace/refine estimated bootstrap chairs.
+    3. Per-frame Global NMS keeps the registry 100% clean every frame.
     """
 
-    def __init__(self, iou_threshold=0.35, min_confidence=0.40, bootstrap_persistence=30):
+    def __init__(self, iou_threshold=0.20, min_confidence=0.40, bootstrap_persistence=30):
         self.iou_threshold = iou_threshold
         self.min_confidence = min_confidence
         self.bootstrap_persistence = bootstrap_persistence
         self.next_chair_id = 1
-
-        # registry: dict of chair_id -> dict {
-        #   "id": int, "bbox": [x1,y1,x2,y2], "conf": float,
-        #   "age": int, "is_bootstrap": bool, "last_seen_frame": int
-        # }
         self.registry = {}
-
-        # Stationary person tracking for bootstrap fallback:
-        # pid -> {"centroid": (cx,cy), "frames": int, "last_bbox": [x1,y1,x2,y2]}
         self.person_stability = {}
 
     def process_frame(self, frame_count, live_chair_detections, tracked_persons=None):
-        """
-        Executes the total per-frame cleanup pipeline.
-        Returns clean_chairs dict {chair_id: chair_dict}.
-        """
         all_candidates = []
 
-        # -------------------------------------------------------------
-        # 1a. Collect Existing Registry Chairs as Candidates
-        # -------------------------------------------------------------
+        # 1a. Existing Registry Chairs
         for cid, entry in self.registry.items():
             all_candidates.append({
                 "id": cid,
@@ -53,9 +35,7 @@ class ChairRegistry:
                 "priority": 3 if not entry.get("is_bootstrap") else 1
             })
 
-        # -------------------------------------------------------------
-        # 1b. Collect Live YOLO Chair Detections as Candidates
-        # -------------------------------------------------------------
+        # 1b. Live YOLO Chair Detections
         for det in live_chair_detections:
             conf = det.get("confidence", 1.0)
             if conf >= self.min_confidence:
@@ -69,35 +49,24 @@ class ChairRegistry:
                     "priority": 2
                 })
 
-        # -------------------------------------------------------------
-        # 1c. Collect Person-Bootstrap Candidates (Stationary Persons without existing chair)
-        # -------------------------------------------------------------
+        # 1c. Person-Bootstrap Candidates
         if tracked_persons:
             bootstrap_candidates = self._generate_bootstrap_candidates(tracked_persons, all_candidates)
             all_candidates.extend(bootstrap_candidates)
 
         total_candidate_count = len(all_candidates)
 
-        # -------------------------------------------------------------
-        # 2. Global NMS / Merge Across ALL Candidates (IoU >= 0.35)
-        # -------------------------------------------------------------
+        # 2. Aggressive Global NMS / Centroid Merge
         clean_chairs = self._global_nms_merge(all_candidates, frame_count)
 
-        # -------------------------------------------------------------
-        # 3. Replace self.registry completely with clean_chairs
-        # -------------------------------------------------------------
+        # 3. Replace self.registry completely
         self.registry = clean_chairs
 
-        # Debug console output
         print(f"[Frame {frame_count}] Candidates: {total_candidate_count} -> After NMS: {len(self.registry)} unique chairs")
 
         return self.registry
 
     def _generate_bootstrap_candidates(self, tracked_persons, existing_candidates):
-        """
-        Identifies stationary persons (shift < 25px for >= 30 frames)
-        and returns estimated chair candidates ONLY IF no chair already overlaps.
-        """
         bootstrap_list = []
         active_pids = set(tracked_persons.keys())
 
@@ -131,22 +100,29 @@ class ChairRegistry:
                 pw = max(1, px2 - px1)
                 ph = max(1, py2 - py1)
 
-                # Estimate lower body seat bbox
                 seat_y1 = py1 + int(ph * 0.45)
                 seat_y2 = py2
                 pad_x = int(pw * 0.15)
                 est_bbox = [max(0, px1 - pad_x), seat_y1, px2 + pad_x, seat_y2]
 
-                # Check if this estimated seat ALREADY overlaps (IoU >= 0.15) with any existing candidate or bootstrap item
+                # Check if this estimated seat ALREADY overlaps or is near ANY existing candidate
                 already_has_chair = False
                 for cand in existing_candidates:
-                    if compute_iou(est_bbox, cand["bbox"]) >= 0.15:
+                    c1 = compute_centroid(est_bbox)
+                    c2 = compute_centroid(cand["bbox"])
+                    dist = math.hypot(c1[0] - c2[0], c1[1] - c2[1])
+                    iou = compute_iou(est_bbox, cand["bbox"])
+                    if iou >= 0.15 or dist < 120.0:
                         already_has_chair = True
                         break
 
                 if not already_has_chair:
                     for b_item in bootstrap_list:
-                        if compute_iou(est_bbox, b_item["bbox"]) >= 0.15:
+                        c1 = compute_centroid(est_bbox)
+                        c2 = compute_centroid(b_item["bbox"])
+                        dist = math.hypot(c1[0] - c2[0], c1[1] - c2[1])
+                        iou = compute_iou(est_bbox, b_item["bbox"])
+                        if iou >= 0.15 or dist < 120.0:
                             already_has_chair = True
                             break
 
@@ -161,7 +137,6 @@ class ChairRegistry:
                         "priority": 1
                     })
 
-        # Cleanup stale person stability trackers
         stale_pids = [p for p in self.person_stability if p not in active_pids]
         for p in stale_pids:
             del self.person_stability[p]
@@ -169,15 +144,10 @@ class ChairRegistry:
         return bootstrap_list
 
     def _global_nms_merge(self, candidates, frame_count):
-        """
-        Global NMS & Merge logic:
-        Sorts candidates by priority (Existing Registry > Real YOLO > Bootstrap) and Age.
-        Merges candidates with IoU >= self.iou_threshold into a single unique chair.
-        """
         if not candidates:
             return {}
 
-        # Sort candidates: highest priority first, then highest age, then highest conf
+        # Priority sort: Registered Chairs > Real YOLO > Bootstrap
         candidates.sort(key=lambda c: (c["priority"], c["age"], c["conf"]), reverse=True)
 
         merged_result = {}
@@ -190,11 +160,8 @@ class ChairRegistry:
             anchor = candidates[i]
             used[i] = True
 
-            # Determine chair_id
-            if anchor["id"] is not None:
-                chair_id = anchor["id"]
-            else:
-                chair_id = self.next_chair_id
+            chair_id = anchor["id"] if anchor["id"] is not None else self.next_chair_id
+            if anchor["id"] is None:
                 self.next_chair_id += 1
 
             best_bbox = list(anchor["bbox"])
@@ -202,24 +169,25 @@ class ChairRegistry:
             is_bootstrap = anchor["is_bootstrap"]
             age = anchor["age"]
 
-            # Merge any overlapping candidate into this anchor
             for j in range(i + 1, len(candidates)):
                 if used[j]:
                     continue
 
                 cand = candidates[j]
                 iou = compute_iou(best_bbox, cand["bbox"])
+                c1 = compute_centroid(best_bbox)
+                c2 = compute_centroid(cand["bbox"])
+                dist = math.hypot(c1[0] - c2[0], c1[1] - c2[1])
 
-                if iou >= self.iou_threshold:
+                # Aggressive merge condition: IoU >= 0.20 OR Centroid Distance < 120px
+                if iou >= self.iou_threshold or dist < 120.0:
                     used[j] = True
 
-                    # If candidate is a real YOLO detection and anchor is bootstrap, update bbox to YOLO
                     if not cand["is_bootstrap"] and is_bootstrap:
                         best_bbox = list(cand["bbox"])
                         is_bootstrap = False
                         best_conf = max(best_conf, cand["conf"])
                     elif not cand["is_bootstrap"] and not is_bootstrap:
-                        # Smooth position using moving average
                         alpha = 0.30
                         best_bbox = [
                             int(alpha * cand["bbox"][k] + (1 - alpha) * best_bbox[k])

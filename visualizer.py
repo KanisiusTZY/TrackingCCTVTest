@@ -64,6 +64,9 @@ class Visualizer:
 
         # Render each chair entry in ChairRegistry
         for chair_id, chair in registered_chairs.items():
+            if chair.get("suppressed", False):
+                continue
+
             status = chair.get("status", "TIDAK DI TEMPAT")
 
             if status == "BEKERJA":
