@@ -17,12 +17,12 @@ def format_duration(seconds):
 
 class RuleChairStatus(BaseRule):
     """
-    Evaluates status per UNIQUE chair from clean_chairs with Centroid Distance Matching & Workstation Suppression (260px radius).
+    Evaluates status per UNIQUE chair from clean_chairs with Total Employee Workstation Suppression.
 
     Guarantees:
     - EXACTLY ONE status per chair_id per frame.
     - Matches persons to chairs if IoU >= 0.15 OR Centroid Distance < 160px.
-    - Suppresses stray empty red boxes on chair backrests or nearby areas within 260px radius of working employees.
+    - Suppresses stray empty red boxes on chair backrests or nearby areas within 220px radius of ANY detected employee.
     """
     def __init__(self, enabled=True):
         super().__init__(name="Dynamic Chair Status (BEKERJA / TIDAK DI TEMPAT)", rule_id="rule_chair_status", enabled=enabled)
@@ -114,21 +114,21 @@ class RuleChairStatus(BaseRule):
                 chair["matched_person_id"] = None
                 chair["matched_upper_body_bbox"] = None
 
-        # Step 2: Workstation Proximity Suppression Pass (260px Radius)
-        # Suppress any empty chair candidate located near an active working employee.
+        # Step 2: Total Workstation Proximity Suppression Pass (220px Radius)
+        # Suppress any empty chair candidate located near ANY detected employee (sitting or standing)
         for chair_id, chair in clean_chairs.items():
             if chair["status"] == "TIDAK DI TEMPAT":
                 for person_id, person in tracked_persons.items():
-                    if person_id in assigned_person_ids:
-                        p_bbox = person["bbox"]
-                        iou = compute_iou(chair["bbox"], p_bbox)
-                        p_c = compute_centroid(p_bbox)
-                        c_c = compute_centroid(chair["bbox"])
-                        dist = math.hypot(p_c[0] - c_c[0], p_c[1] - c_c[1])
+                    p_bbox = person["bbox"]
+                    iou = compute_iou(chair["bbox"], p_bbox)
+                    p_c = compute_centroid(p_bbox)
+                    c_c = compute_centroid(chair["bbox"])
+                    dist = math.hypot(p_c[0] - c_c[0], p_c[1] - c_c[1])
 
-                        if iou >= 0.05 or dist < 260.0:
-                            chair["suppressed"] = True
-                            break
+                    # If an empty chair is right under or near a person (dist < 220px or IoU >= 0.05)
+                    if iou >= 0.05 or dist < 220.0:
+                        chair["suppressed"] = True
+                        break
 
         stale_cids = [cid for cid in self.prev_status if cid not in clean_chairs]
         for cid in stale_cids:
