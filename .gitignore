@@ -1,0 +1,23 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Models and heavy weights
+*.pt
+*.onnx
+*.engine
+
+# Video media and snapshots
+*.mp4
+*.avi
+*.mov
+*.jpg
+*.png
+
+# Environment & IDE
+.env
+venv/
+.venv/
+.idea/
+.vscode/
