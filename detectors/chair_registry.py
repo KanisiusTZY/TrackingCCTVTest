@@ -2,16 +2,29 @@ import math
 import numpy as np
 from tracker import compute_iou, compute_centroid
 
+def compute_horizontal_overlap_ratio(bbox1, bbox2):
+    x1 = max(bbox1[0], bbox2[0])
+    x2 = min(bbox1[2], bbox2[2])
+    inter_x = max(0, x2 - x1)
+
+    w1 = max(1, bbox1[2] - bbox1[0])
+    w2 = max(1, bbox2[2] - bbox2[0])
+    min_w = min(w1, w2)
+
+    return inter_x / float(min_w)
+
+
 class ChairRegistry:
     """
-    Chair Registry with Workstation Isolation & Person-Bootstrap.
+    Chair Registry with Standing-Person Rejection & Global Workstation Deduplication.
 
     Guarantees:
-    1. Dedicated chair candidate for each seated workstation (Foreground, Blonde, Background).
-    2. Keeps registry deduplicated per workstation.
+    1. Rejects bootstrap candidates for standing upright persons (h/w >= 1.75).
+    2. Aggressively merges backrests, seats, and desk boxes into 1 chair per workstation.
+    3. Purges stale unseen chairs (> 20 frames) so old duplicate boxes never accumulate.
     """
 
-    def __init__(self, iou_threshold=0.25, min_confidence=0.35, bootstrap_persistence=8):
+    def __init__(self, iou_threshold=0.20, min_confidence=0.35, bootstrap_persistence=10):
         self.iou_threshold = iou_threshold
         self.min_confidence = min_confidence
         self.bootstrap_persistence = bootstrap_persistence
@@ -22,17 +35,18 @@ class ChairRegistry:
     def process_frame(self, frame_count, live_chair_detections, tracked_persons=None):
         all_candidates = []
 
-        # 1a. Existing Registry Chairs
-        for cid, entry in self.registry.items():
-            all_candidates.append({
-                "id": cid,
-                "bbox": list(entry["bbox"]),
-                "conf": entry["conf"],
-                "age": entry["age"] + 1,
-                "is_bootstrap": entry.get("is_bootstrap", False),
-                "source": "registry",
-                "priority": 3 if not entry.get("is_bootstrap") else 1
-            })
+        # 1a. Existing Registry Chairs (Filter out stale chairs > 25 frames old)
+        for cid, entry in list(self.registry.items()):
+            if frame_count - entry.get("last_seen_frame", frame_count) < 25:
+                all_candidates.append({
+                    "id": cid,
+                    "bbox": list(entry["bbox"]),
+                    "conf": entry["conf"],
+                    "age": entry["age"] + 1,
+                    "is_bootstrap": entry.get("is_bootstrap", False),
+                    "source": "registry",
+                    "priority": 2 if not entry.get("is_bootstrap") else 1
+                })
 
         # 1b. Live YOLO Chair Detections
         for det in live_chair_detections:
@@ -45,17 +59,17 @@ class ChairRegistry:
                     "age": 0,
                     "is_bootstrap": False,
                     "source": "yolo",
-                    "priority": 2
+                    "priority": 3
                 })
 
-        # 1c. Person-Bootstrap Candidates for Seated Employees
+        # 1c. Person-Bootstrap Candidates for SEATED Employees ONLY (Rejects Standing Persons)
         if tracked_persons:
             bootstrap_candidates = self._generate_bootstrap_candidates(tracked_persons, all_candidates)
             all_candidates.extend(bootstrap_candidates)
 
         total_candidate_count = len(all_candidates)
 
-        # 2. Global NMS Merge
+        # 2. Aggressive Global NMS / Centroid / X-Overlap Merge
         clean_chairs = self._global_nms_merge(all_candidates, frame_count)
 
         # 3. Replace self.registry completely
@@ -71,6 +85,17 @@ class ChairRegistry:
 
         for pid, person in tracked_persons.items():
             full_bbox = person["bbox"]
+            px1, py1, px2, py2 = full_bbox
+            pw = max(1, px2 - px1)
+            ph = max(1, py2 - py1)
+            aspect_ratio = ph / float(pw)
+
+            # REJECT STANDING PERSONS: Standing upright persons have aspect ratio >= 1.75 and ph >= 260px
+            # Standing employees at cabinets must NEVER get a bootstrap chair!
+            is_standing = (aspect_ratio >= 1.75 and ph >= 250)
+            if is_standing:
+                continue
+
             centroid = compute_centroid(full_bbox)
 
             if pid not in self.person_stability:
@@ -83,7 +108,7 @@ class ChairRegistry:
                 prev_c = self.person_stability[pid]["centroid"]
                 dist = math.hypot(centroid[0] - prev_c[0], centroid[1] - prev_c[1])
 
-                if dist < 50.0:  # Seated typing/working movement tolerance
+                if dist < 45.0:  # Seated typing/working movement tolerance
                     self.person_stability[pid]["frames"] += 1
                     self.person_stability[pid]["last_bbox"] = full_bbox
                 else:
@@ -110,9 +135,9 @@ class ChairRegistry:
                     c2 = compute_centroid(cand["bbox"])
                     dist = math.hypot(c1[0] - c2[0], c1[1] - c2[1])
                     iou = compute_iou(est_bbox, cand["bbox"])
+                    h_overlap = compute_horizontal_overlap_ratio(est_bbox, cand["bbox"])
 
-                    # Require IoU >= 0.35 or dist < 60px to consider duplicate
-                    if iou >= 0.35 or dist < 60.0:
+                    if iou >= 0.15 or dist < 120.0 or h_overlap >= 0.35:
                         already_has_chair = True
                         break
 
@@ -137,7 +162,8 @@ class ChairRegistry:
         if not candidates:
             return {}
 
-        candidates.sort(key=lambda c: (c["priority"], c["age"], c["conf"]), reverse=True)
+        # Priority sort: Real Live YOLO > Registry > Bootstrap
+        candidates.sort(key=lambda c: (c["priority"], c["conf"]), reverse=True)
 
         merged_result = {}
         used = [False] * len(candidates)
@@ -167,13 +193,14 @@ class ChairRegistry:
                 c1 = compute_centroid(best_bbox)
                 c2 = compute_centroid(cand["bbox"])
                 dist = math.hypot(c1[0] - c2[0], c1[1] - c2[1])
+                h_overlap = compute_horizontal_overlap_ratio(best_bbox, cand["bbox"])
 
-                # Do NOT merge chairs if vertical Y distance > 80px (separate workstations vertically)
-                dy = abs(c1[1] - c2[1])
-                dx = abs(c1[0] - c2[0])
-
-                if (iou >= self.iou_threshold or dist < 70.0) and dy < 80.0:
+                # Aggressive merge condition:
+                # Merge if IoU >= 0.18 OR Centroid Distance < 160px OR X-Overlap >= 35%
+                if iou >= self.iou_threshold or dist < 160.0 or h_overlap >= 0.35:
                     used[j] = True
+
+                    # Combine bboxes into 1 single bounding box for the workstation
                     best_bbox = [
                         min(best_bbox[0], cand["bbox"][0]),
                         min(best_bbox[1], cand["bbox"][1]),
@@ -181,7 +208,7 @@ class ChairRegistry:
                         max(best_bbox[3], cand["bbox"][3])
                     ]
 
-                    if not cand["is_bootstrap"] and is_bootstrap:
+                    if not cand["is_bootstrap"]:
                         is_bootstrap = False
                         best_conf = max(best_conf, cand["conf"])
 
