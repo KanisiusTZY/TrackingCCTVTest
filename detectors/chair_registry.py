@@ -20,14 +20,15 @@ def compute_horizontal_overlap_ratio(bbox1, bbox2):
 
 class ChairRegistry:
     """
-    Refined Chair Registry with Aggressive NMS, Horizontal Overlap Merging & Proximity Filtering.
+    Refined Chair Registry with Fast Person-Bootstrap (15 frames) & Aggressive Deduplication.
 
     Guarantees:
-    1. Zero duplicate chair boxes (Merges backrests & seats of the same physical chair).
-    2. Per-frame Global NMS keeps the registry 100% clean every frame.
+    1. Zero duplicate chair boxes.
+    2. Fast bootstrap for seated employees (15 frames with typing movement tolerance).
+    3. Per-frame Global NMS keeps the registry 100% clean every frame.
     """
 
-    def __init__(self, iou_threshold=0.20, min_confidence=0.40, bootstrap_persistence=30):
+    def __init__(self, iou_threshold=0.20, min_confidence=0.35, bootstrap_persistence=15):
         self.iou_threshold = iou_threshold
         self.min_confidence = min_confidence
         self.bootstrap_persistence = bootstrap_persistence
@@ -82,6 +83,10 @@ class ChairRegistry:
         return self.registry
 
     def _generate_bootstrap_candidates(self, tracked_persons, existing_candidates):
+        """
+        Identifies seated persons (shift < 45px for >= 15 frames)
+        and creates estimated seat candidate if no chair already overlaps.
+        """
         bootstrap_list = []
         active_pids = set(tracked_persons.keys())
 
@@ -99,7 +104,7 @@ class ChairRegistry:
                 prev_c = self.person_stability[pid]["centroid"]
                 dist = math.hypot(centroid[0] - prev_c[0], centroid[1] - prev_c[1])
 
-                if dist < 25.0:
+                if dist < 45.0:  # Allow natural head & arm typing movement
                     self.person_stability[pid]["frames"] += 1
                     self.person_stability[pid]["last_bbox"] = full_bbox
                 else:
@@ -166,7 +171,6 @@ class ChairRegistry:
         if not candidates:
             return {}
 
-        # Priority sort: Registered Chairs > Real YOLO > Bootstrap
         candidates.sort(key=lambda c: (c["priority"], c["age"], c["conf"]), reverse=True)
 
         merged_result = {}
@@ -201,11 +205,9 @@ class ChairRegistry:
                 h_overlap = compute_horizontal_overlap_ratio(best_bbox, cand["bbox"])
                 same_column = (h_overlap >= 0.60 and abs(c1[0] - c2[0]) < 90.0)
 
-                # Aggressive merge condition: IoU >= 0.20 OR Centroid Distance < 120px OR Same Vertical Column (Backrest+Seat)
                 if iou >= self.iou_threshold or dist < 120.0 or same_column:
                     used[j] = True
 
-                    # Combine bboxes to enclose both backrest and seat if same column
                     if same_column:
                         best_bbox = [
                             min(best_bbox[0], cand["bbox"][0]),
