@@ -10,13 +10,13 @@ class ChairRegistry:
     1. ZERO duplicate entries in the registry at any frame.
     2. Every frame performs a GLOBAL NMS / Merge across:
        - Existing persistent registry chairs
-       - Live YOLO chair detections (conf >= 0.35)
-       - Person-bootstrap chair candidates (stationary persons >= 30 frames)
+       - Live YOLO chair detections (conf >= 0.40, aspect ratio filtered)
+       - Person-bootstrap chair candidates (stationary persons >= 30 frames without existing chair)
     3. Replaces self.registry with the deduplicated clean list EVERY FRAME.
     4. Console debug logging: "[Frame X] Candidates: Y -> After NMS: Z unique chairs"
     """
 
-    def __init__(self, iou_threshold=0.30, min_confidence=0.35, bootstrap_persistence=30):
+    def __init__(self, iou_threshold=0.35, min_confidence=0.40, bootstrap_persistence=30):
         self.iou_threshold = iou_threshold
         self.min_confidence = min_confidence
         self.bootstrap_persistence = bootstrap_persistence
@@ -70,16 +70,16 @@ class ChairRegistry:
                 })
 
         # -------------------------------------------------------------
-        # 1c. Collect Person-Bootstrap Candidates (Stationary Persons)
+        # 1c. Collect Person-Bootstrap Candidates (Stationary Persons without existing chair)
         # -------------------------------------------------------------
         if tracked_persons:
-            bootstrap_candidates = self._generate_bootstrap_candidates(tracked_persons)
+            bootstrap_candidates = self._generate_bootstrap_candidates(tracked_persons, all_candidates)
             all_candidates.extend(bootstrap_candidates)
 
         total_candidate_count = len(all_candidates)
 
         # -------------------------------------------------------------
-        # 2. Global NMS / Merge Across ALL Candidates (IoU >= 0.30)
+        # 2. Global NMS / Merge Across ALL Candidates (IoU >= 0.35)
         # -------------------------------------------------------------
         clean_chairs = self._global_nms_merge(all_candidates, frame_count)
 
@@ -88,15 +88,15 @@ class ChairRegistry:
         # -------------------------------------------------------------
         self.registry = clean_chairs
 
-        # Debug console output required by specification
+        # Debug console output
         print(f"[Frame {frame_count}] Candidates: {total_candidate_count} -> After NMS: {len(self.registry)} unique chairs")
 
         return self.registry
 
-    def _generate_bootstrap_candidates(self, tracked_persons):
+    def _generate_bootstrap_candidates(self, tracked_persons, existing_candidates):
         """
-        Identifies stationary persons (shift < 30px for >= 30 frames)
-        and returns estimated chair candidates.
+        Identifies stationary persons (shift < 25px for >= 30 frames)
+        and returns estimated chair candidates ONLY IF no chair already overlaps.
         """
         bootstrap_list = []
         active_pids = set(tracked_persons.keys())
@@ -115,7 +115,7 @@ class ChairRegistry:
                 prev_c = self.person_stability[pid]["centroid"]
                 dist = math.hypot(centroid[0] - prev_c[0], centroid[1] - prev_c[1])
 
-                if dist < 30.0:
+                if dist < 25.0:
                     self.person_stability[pid]["frames"] += 1
                     self.person_stability[pid]["last_bbox"] = full_bbox
                 else:
@@ -137,15 +137,29 @@ class ChairRegistry:
                 pad_x = int(pw * 0.15)
                 est_bbox = [max(0, px1 - pad_x), seat_y1, px2 + pad_x, seat_y2]
 
-                bootstrap_list.append({
-                    "id": None,
-                    "bbox": est_bbox,
-                    "conf": 0.50,
-                    "age": 0,
-                    "is_bootstrap": True,
-                    "source": "bootstrap",
-                    "priority": 1
-                })
+                # Check if this estimated seat ALREADY overlaps (IoU >= 0.15) with any existing candidate or bootstrap item
+                already_has_chair = False
+                for cand in existing_candidates:
+                    if compute_iou(est_bbox, cand["bbox"]) >= 0.15:
+                        already_has_chair = True
+                        break
+
+                if not already_has_chair:
+                    for b_item in bootstrap_list:
+                        if compute_iou(est_bbox, b_item["bbox"]) >= 0.15:
+                            already_has_chair = True
+                            break
+
+                if not already_has_chair:
+                    bootstrap_list.append({
+                        "id": None,
+                        "bbox": est_bbox,
+                        "conf": 0.50,
+                        "age": 0,
+                        "is_bootstrap": True,
+                        "source": "bootstrap",
+                        "priority": 1
+                    })
 
         # Cleanup stale person stability trackers
         stale_pids = [p for p in self.person_stability if p not in active_pids]
