@@ -37,6 +37,7 @@ def main():
     parser.add_argument("--display-width", type=int, default=1280, help="Display window max width in pixels (default: 1280)")
     parser.add_argument("--headless", action="store_true", help="Run without rendering GUI display window")
     parser.add_argument("--max-frames", type=int, default=0, help="Stop after processing max frames (0 = unlimited)")
+    parser.add_argument("--model", type=str, default="yolov8m.pt", help="YOLO model variant (e.g. yolov8m.pt, yolov8x.pt, yolo11m.pt) (default: yolov8m.pt)")
     args = parser.parse_args()
 
     # Load configuration
@@ -47,8 +48,8 @@ def main():
 
     # Initialize detection, registry & tracking components
     print("[INFO] Initializing Chair Registry & Upper-Body Monitoring System...")
-    detector = ObjectDetector(confidence_threshold=0.20, upper_body_ratio=upper_body_ratio)
-    chair_registry = ChairRegistry(iou_threshold=0.30, min_confidence=0.35, bootstrap_persistence=persistence * 2)
+    detector = ObjectDetector(model_name=args.model, confidence_threshold=0.10, upper_body_ratio=upper_body_ratio)
+    chair_registry = ChairRegistry(iou_threshold=0.30, min_confidence=0.15, bootstrap_persistence=persistence * 2)
     person_tracker = PersonTracker(max_disappeared=30)
     rule_engine = RuleEngine(config)
     visualizer = Visualizer()
