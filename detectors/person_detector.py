@@ -51,7 +51,6 @@ class ObjectDetector:
                     box_area = box_w * box_h
 
                     if cls_id == 0 and conf >= 0.18:
-                        # Person: accept foreground, midground, and distant background employees
                         if box_w >= 15 and box_h >= 25 and box_w < int(w * 0.95) and box_h < int(h * 0.98):
                             y2_upper = y1 + int(box_h * ratio)
                             y2_upper = min(y2, max(y1 + 10, y2_upper))
@@ -65,17 +64,20 @@ class ObjectDetector:
                                 "upper_body_bbox": [x1_upper, y1, x2_upper, y2_upper],
                                 "confidence": conf
                             })
-                    elif cls_id == 56 and conf >= 0.35:
+                    elif cls_id == 56 and conf >= 0.30:
                         # Chair filter:
+                        # 1. Require real chair dimensions (conf >= 0.30, area >= 10000, h >= 70, w >= 60)
+                        # 2. Rejection ONLY for shallow wall cabinets under window (x1 > 1250 and y2 < 580 and h < 250)
+                        # 3. Spatial rejection for paper trays & desk surfaces (y1 > 660 and x1 > 980 and x2 < 1600)
                         aspect_ratio = box_h / float(box_w)
-                        is_paper_tray_or_desk = (y1 > 640 and x1 > 980 and x2 < 1600)
-                        is_wall_cabinet = (x1 > 1200 and y2 < 680 and box_h < 360)
-                        is_flat_desk = (aspect_ratio < 0.60 and y1 > 400)
+                        is_paper_tray_or_desk = (y1 > 660 and x1 > 980 and x2 < 1600)
+                        is_wall_cabinet = (x1 > 1250 and y2 < 580 and box_h < 250)
+                        is_flat_desk = (aspect_ratio < 0.55 and y1 > 400)
 
-                        if (0.55 <= aspect_ratio <= 2.2 and
-                            box_area >= 12000 and
-                            box_w >= 65 and
-                            box_h >= 75 and
+                        if (0.55 <= aspect_ratio <= 2.5 and
+                            box_area >= 10000 and
+                            box_w >= 60 and
+                            box_h >= 70 and
                             not is_paper_tray_or_desk and
                             not is_wall_cabinet and
                             not is_flat_desk):

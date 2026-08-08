@@ -16,15 +16,15 @@ def compute_horizontal_overlap_ratio(bbox1, bbox2):
 
 class ChairRegistry:
     """
-    Chair Registry with Standing-Person Rejection & Global Workstation Deduplication.
+    Persistent Chair Registry with Workstation Isolation & Standing Person Rejection.
 
     Guarantees:
-    1. Rejects bootstrap candidates for standing upright persons (h/w >= 1.75).
-    2. Aggressively merges backrests, seats, and desk boxes into 1 chair per workstation.
-    3. Purges stale unseen chairs (> 20 frames) so old duplicate boxes never accumulate.
+    1. Keeps empty registered chairs persistent for 60 frames so red boxes never vanish.
+    2. Rejects bootstrap candidates for standing upright persons (h/w >= 1.75).
+    3. Merges duplicate detections for the same physical chair.
     """
 
-    def __init__(self, iou_threshold=0.20, min_confidence=0.35, bootstrap_persistence=10):
+    def __init__(self, iou_threshold=0.25, min_confidence=0.30, bootstrap_persistence=10):
         self.iou_threshold = iou_threshold
         self.min_confidence = min_confidence
         self.bootstrap_persistence = bootstrap_persistence
@@ -35,9 +35,9 @@ class ChairRegistry:
     def process_frame(self, frame_count, live_chair_detections, tracked_persons=None):
         all_candidates = []
 
-        # 1a. Existing Registry Chairs (Filter out stale chairs > 25 frames old)
+        # 1a. Existing Registry Chairs (Keep alive for 60 frames)
         for cid, entry in list(self.registry.items()):
-            if frame_count - entry.get("last_seen_frame", frame_count) < 25:
+            if frame_count - entry.get("last_seen_frame", frame_count) < 60:
                 all_candidates.append({
                     "id": cid,
                     "bbox": list(entry["bbox"]),
@@ -62,14 +62,14 @@ class ChairRegistry:
                     "priority": 3
                 })
 
-        # 1c. Person-Bootstrap Candidates for SEATED Employees ONLY (Rejects Standing Persons)
+        # 1c. Person-Bootstrap Candidates for SEATED Employees ONLY
         if tracked_persons:
             bootstrap_candidates = self._generate_bootstrap_candidates(tracked_persons, all_candidates)
             all_candidates.extend(bootstrap_candidates)
 
         total_candidate_count = len(all_candidates)
 
-        # 2. Aggressive Global NMS / Centroid / X-Overlap Merge
+        # 2. Global NMS Merge
         clean_chairs = self._global_nms_merge(all_candidates, frame_count)
 
         # 3. Replace self.registry completely
@@ -90,8 +90,7 @@ class ChairRegistry:
             ph = max(1, py2 - py1)
             aspect_ratio = ph / float(pw)
 
-            # REJECT STANDING PERSONS: Standing upright persons have aspect ratio >= 1.75 and ph >= 260px
-            # Standing employees at cabinets must NEVER get a bootstrap chair!
+            # REJECT STANDING PERSONS: Standing upright persons (aspect ratio >= 1.75 & ph >= 250px) cannot be seated!
             is_standing = (aspect_ratio >= 1.75 and ph >= 250)
             if is_standing:
                 continue
@@ -108,7 +107,7 @@ class ChairRegistry:
                 prev_c = self.person_stability[pid]["centroid"]
                 dist = math.hypot(centroid[0] - prev_c[0], centroid[1] - prev_c[1])
 
-                if dist < 45.0:  # Seated typing/working movement tolerance
+                if dist < 50.0:  # Seated typing/working movement tolerance
                     self.person_stability[pid]["frames"] += 1
                     self.person_stability[pid]["last_bbox"] = full_bbox
                 else:
@@ -162,7 +161,6 @@ class ChairRegistry:
         if not candidates:
             return {}
 
-        # Priority sort: Real Live YOLO > Registry > Bootstrap
         candidates.sort(key=lambda c: (c["priority"], c["conf"]), reverse=True)
 
         merged_result = {}
@@ -183,6 +181,10 @@ class ChairRegistry:
             best_conf = anchor["conf"]
             is_bootstrap = anchor["is_bootstrap"]
             age = anchor["age"]
+            last_seen = anchor.get("last_seen_frame", frame_count)
+
+            if anchor["source"] == "yolo":
+                last_seen = frame_count
 
             for j in range(i + 1, len(candidates)):
                 if used[j]:
@@ -195,12 +197,9 @@ class ChairRegistry:
                 dist = math.hypot(c1[0] - c2[0], c1[1] - c2[1])
                 h_overlap = compute_horizontal_overlap_ratio(best_bbox, cand["bbox"])
 
-                # Aggressive merge condition:
-                # Merge if IoU >= 0.18 OR Centroid Distance < 160px OR X-Overlap >= 35%
-                if iou >= self.iou_threshold or dist < 160.0 or h_overlap >= 0.35:
+                if iou >= self.iou_threshold or dist < 140.0 or h_overlap >= 0.35:
                     used[j] = True
 
-                    # Combine bboxes into 1 single bounding box for the workstation
                     best_bbox = [
                         min(best_bbox[0], cand["bbox"][0]),
                         min(best_bbox[1], cand["bbox"][1]),
@@ -211,6 +210,7 @@ class ChairRegistry:
                     if not cand["is_bootstrap"]:
                         is_bootstrap = False
                         best_conf = max(best_conf, cand["conf"])
+                        last_seen = frame_count
 
             merged_result[chair_id] = {
                 "id": chair_id,
@@ -219,7 +219,7 @@ class ChairRegistry:
                 "conf": best_conf,
                 "age": age,
                 "is_bootstrap": is_bootstrap,
-                "last_seen_frame": frame_count
+                "last_seen_frame": last_seen
             }
 
         return merged_result
