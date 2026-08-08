@@ -4,11 +4,11 @@ import numpy as np
 class ObjectDetector:
     """
     Detects 'person' (COCO class 0) and 'chair' (COCO class 56) using YOLOv8.
-    Applies geometry and spatial filters:
-    - Person: conf >= 0.18 (detects foreground, midground, background employees).
-    - Chair: conf >= 0.18 (captures empty wheelchairs at all angles and lighting).
+    Optimized for high-recall in occluded office environments:
+    - Person: conf >= 0.10 (captures people facing away, heads behind monitors, background employees).
+    - Chair: conf >= 0.15 (captures workstation chairs at all angles).
     """
-    def __init__(self, confidence_threshold=0.18, upper_body_ratio=0.55):
+    def __init__(self, confidence_threshold=0.10, upper_body_ratio=0.55):
         self.confidence_threshold = confidence_threshold
         self.upper_body_ratio = upper_body_ratio
         self.model = None
@@ -35,7 +35,8 @@ class ObjectDetector:
             return {"persons": persons, "chairs": chairs}
 
         try:
-            results = self.model(frame, verbose=False, classes=[0, 56], conf=0.15)
+            # Low confidence threshold 0.10 for maximum recall of occluded people
+            results = self.model(frame, verbose=False, classes=[0, 56], conf=0.10)
             for r in results:
                 boxes = r.boxes
                 for box in boxes:
@@ -52,34 +53,31 @@ class ObjectDetector:
                     box_h = y2 - y1
                     box_area = box_w * box_h
 
-                    if cls_id == 0 and conf >= 0.18:
-                        if box_w >= 15 and box_h >= 25 and box_w < int(w * 0.95) and box_h < int(h * 0.98):
-                            y2_upper = y1 + int(box_h * ratio)
+                    if cls_id == 0 and conf >= 0.10:
+                        # Accept any person size (even small heads behind monitors)
+                        if box_w >= 10 and box_h >= 15 and box_w < int(w * 0.98) and box_h < int(h * 0.98):
+                            y2_upper = y1 + int(box_h * max(ratio, 0.65))
                             y2_upper = min(y2, max(y1 + 10, y2_upper))
 
-                            margin_x = int(box_w * 0.05)
-                            x1_upper = x1 + margin_x
-                            x2_upper = x2 - margin_x
+                            margin_x = int(box_w * 0.02)
+                            x1_upper = max(0, x1 - margin_x)
+                            x2_upper = min(w - 1, x2 + margin_x)
 
                             persons.append({
                                 "bbox": [x1, y1, x2, y2],
                                 "upper_body_bbox": [x1_upper, y1, x2_upper, y2_upper],
                                 "confidence": conf
                             })
-                    elif cls_id == 56 and conf >= 0.18:
-                        # Chair filter:
-                        # 1. Dimensions: conf >= 0.18, area >= 9000, h >= 60, w >= 55
-                        # 2. Rejection ONLY for shallow wall cabinets under window (x1 > 1250 and y2 < 580 and h < 220)
-                        # 3. Rejection for paper trays & floor drawers under table (y1 > 660 and x1 > 980 and x2 < 1600)
+                    elif cls_id == 56 and conf >= 0.15:
                         aspect_ratio = box_h / float(box_w)
-                        is_paper_tray_or_desk = (y1 > 660 and x1 > 980 and x2 < 1600)
-                        is_wall_cabinet = (x1 > 1250 and y2 < 580 and box_h < 220)
-                        is_flat_desk = (aspect_ratio < 0.50 and y1 > 400)
+                        is_paper_tray_or_desk = (y1 > 680 and x1 > 980 and x2 < 1600)
+                        is_wall_cabinet = (x1 > 1250 and y2 < 550 and box_h < 200)
+                        is_flat_desk = (aspect_ratio < 0.45 and y1 > 450)
 
-                        if (0.50 <= aspect_ratio <= 2.5 and
-                            box_area >= 9000 and
-                            box_w >= 55 and
-                            box_h >= 60 and
+                        if (0.45 <= aspect_ratio <= 2.8 and
+                            box_area >= 8000 and
+                            box_w >= 50 and
+                            box_h >= 55 and
                             not is_paper_tray_or_desk and
                             not is_wall_cabinet and
                             not is_flat_desk):

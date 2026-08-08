@@ -16,16 +16,15 @@ def compute_horizontal_overlap_ratio(bbox1, bbox2):
 
 class ChairRegistry:
     """
-    Instant Chair Registry with Seated Workstation Isolation & Standing Person Rejection.
+    Universal Chair Registry for Multi-Video Office CCTV.
 
     Guarantees:
-    1. INSTANT 1-frame chair candidate generation for ANY seated employee (Foreground, Blonde, Background, Right Desk).
-    2. Zero lag: Seated employees immediately get a green upper-body box 'BEKERJA'.
-    3. Rejects bootstrap candidates for standing upright persons (h/w >= 1.75 & h >= 240px).
-    4. Keeps registered workstation chairs persistent for 150 frames.
+    1. High-recall bootstrap generation for occluded employees and backs to camera.
+    2. Standing upright person rejection (h/w >= 1.75 & h >= 240px).
+    3. Keeps registered workstation chairs persistent for 150 frames.
     """
 
-    def __init__(self, iou_threshold=0.20, min_confidence=0.18, bootstrap_persistence=5):
+    def __init__(self, iou_threshold=0.20, min_confidence=0.15, bootstrap_persistence=5):
         self.iou_threshold = iou_threshold
         self.min_confidence = min_confidence
         self.bootstrap_persistence = bootstrap_persistence
@@ -94,8 +93,7 @@ class ChairRegistry:
             if is_standing:
                 continue
 
-            # Instant workstation seat box for seated employees
-            seat_y1 = py1 + int(ph * 0.30)
+            seat_y1 = py1 + int(ph * 0.25)
             seat_y2 = py2
             pad_x = int(pw * 0.05)
             est_bbox = [max(0, px1 - pad_x), seat_y1, px2 + pad_x, seat_y2]
@@ -108,7 +106,7 @@ class ChairRegistry:
                 iou = compute_iou(est_bbox, cand["bbox"])
                 h_overlap = compute_horizontal_overlap_ratio(est_bbox, cand["bbox"])
 
-                if iou >= 0.15 or dist < 110.0 or h_overlap >= 0.30:
+                if iou >= 0.15 or dist < 120.0 or h_overlap >= 0.30:
                     already_has_chair = True
                     break
 
@@ -165,7 +163,6 @@ class ChairRegistry:
                 dist = math.hypot(c1[0] - c2[0], c1[1] - c2[1])
                 h_overlap = compute_horizontal_overlap_ratio(best_bbox, cand["bbox"])
 
-                # Aggressive workstation NMS merge (IoU >= 0.18 OR dist < 140px OR X-overlap >= 30%)
                 if iou >= self.iou_threshold or dist < 140.0 or h_overlap >= 0.30:
                     used[j] = True
 

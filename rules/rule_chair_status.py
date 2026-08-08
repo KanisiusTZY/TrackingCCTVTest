@@ -26,12 +26,12 @@ def format_duration(seconds):
 
 class RuleChairStatus(BaseRule):
     """
-    Evaluates status per UNIQUE chair with Instant Workstation Matching & Immediate Away Red Boxes.
+    Evaluates status per UNIQUE chair with Universal Back-to-Camera & Occluded Employee Matching.
 
     Guarantees:
-    - Seated employees (Foreground, Blonde, Background, Right Desk) immediately get GREEN box 'BEKERJA'.
-    - Standing upright employees at filing cabinet NEVER get a green box.
-    - When an employee stands up and walks away to cabinet, their empty workstation chair immediately turns RED 'TIDAK DI TEMPAT'.
+    - Employees facing away (backs to camera) or occluded behind monitors match their chairs -> 'BEKERJA'.
+    - Eliminates false-positive red boxes on seated employees facing away.
+    - Empty chairs when employees walk away turn RED 'TIDAK DI TEMPAT'.
     """
     def __init__(self, enabled=True):
         super().__init__(name="Dynamic Chair Status (BEKERJA / TIDAK DI TEMPAT)", rule_id="rule_chair_status", enabled=enabled)
@@ -44,8 +44,8 @@ class RuleChairStatus(BaseRule):
         if not self.enabled:
             return
 
-        iou_thresh = config["thresholds"].get("iou_chair_occupied", 0.05)
-        persistence = 2  # Instant response (2 frames)
+        iou_thresh = config["thresholds"].get("iou_chair_occupied", 0.03)
+        persistence = 2  # Fast 2-frame response
 
         assigned_person_ids = set()
 
@@ -72,22 +72,22 @@ class RuleChairStatus(BaseRule):
                 ph = max(1, py2 - py1)
                 aspect_ratio = ph / float(pw)
 
-                # Standing upright check: Standing upright persons (H/W >= 1.75 and H >= 240px) cannot be seated!
                 is_standing_upright = (aspect_ratio >= 1.75 and ph >= 240)
                 if is_standing_upright:
                     continue
 
                 upper_bbox = person.get("upper_body_bbox", person["bbox"])
                 iou = compute_iou(chair_bbox, upper_bbox)
+                full_iou = compute_iou(chair_bbox, full_bbox)
 
                 p_c = compute_centroid(person["bbox"])
                 c_c = compute_centroid(chair_bbox)
                 dist = math.hypot(p_c[0] - c_c[0], p_c[1] - c_c[1])
                 x_overlap = compute_x_overlap_ratio(chair_bbox, full_bbox)
 
-                # Seated check: Seated employee at workstation matching
-                if iou >= 0.05 or dist < 280.0 or x_overlap >= 0.25:
-                    score = max(iou, 0.40 if dist < 280.0 else 0.0)
+                # Seated check: Matches even if facing away or occluded behind monitor
+                if iou >= 0.03 or full_iou >= 0.03 or dist < 300.0 or x_overlap >= 0.20:
+                    score = max(iou, full_iou, 0.40 if dist < 300.0 else 0.0)
                     if score > max_score:
                         max_score = score
                         best_person = person
@@ -133,7 +133,6 @@ class RuleChairStatus(BaseRule):
                 chair["matched_upper_body_bbox"] = None
 
         # Step 2: Selective Suppression Pass for Seated Workstations ONLY
-        # DO NOT suppress an empty chair if the person is standing upright (H/W >= 1.75) or has walked away (dy >= 120px)
         for chair_id, chair in clean_chairs.items():
             if chair["status"] == "TIDAK DI TEMPAT":
                 for person_id, person in tracked_persons.items():
@@ -149,8 +148,9 @@ class RuleChairStatus(BaseRule):
                     c_c = compute_centroid(chair["bbox"])
                     dist = math.hypot(p_c[0] - c_c[0], p_c[1] - c_c[1])
                     dy = abs(p_c[1] - c_c[1])
+                    x_overlap = compute_x_overlap_ratio(chair["bbox"], p_bbox)
 
-                    if not is_standing_upright and dy < 120.0 and dist < 180.0:
+                    if not is_standing_upright and (dy < 160.0 or x_overlap >= 0.20) and dist < 220.0:
                         chair["suppressed"] = True
                         break
 
