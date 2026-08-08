@@ -17,12 +17,12 @@ def format_duration(seconds):
 
 class RuleChairStatus(BaseRule):
     """
-    Evaluates status per UNIQUE chair from clean_chairs with One-Person-Per-Chair Exclusivity.
+    Evaluates status per UNIQUE chair from clean_chairs with Centroid Distance Matching & Workstation Suppression (260px radius).
 
     Guarantees:
     - EXACTLY ONE status per chair_id per frame.
-    - Each active employee (BEKERJA) gets their OWN dedicated green upper-body box.
-    - Suppresses stray empty red boxes within 160px of an active working employee.
+    - Matches persons to chairs if IoU >= 0.15 OR Centroid Distance < 160px.
+    - Suppresses stray empty red boxes on chair backrests or nearby areas within 260px radius of working employees.
     """
     def __init__(self, enabled=True):
         super().__init__(name="Dynamic Chair Status (BEKERJA / TIDAK DI TEMPAT)", rule_id="rule_chair_status", enabled=enabled)
@@ -60,17 +60,19 @@ class RuleChairStatus(BaseRule):
 
                 upper_bbox = person.get("upper_body_bbox", person["bbox"])
                 iou = compute_iou(chair_bbox, upper_bbox)
-                if iou > max_iou:
-                    max_iou = iou
-                    best_person = person
 
-            # Fallback match: check full-body centroid distance (< 110px)
-            if max_iou < iou_thresh and best_person is not None:
-                p_c = compute_centroid(best_person["bbox"])
+                # Distance check between person centroid and chair centroid
+                p_c = compute_centroid(person["bbox"])
                 c_c = compute_centroid(chair_bbox)
                 dist = math.hypot(p_c[0] - c_c[0], p_c[1] - c_c[1])
-                if dist < 110.0:
-                    max_iou = iou_thresh
+
+                match_score = iou
+                if dist < 160.0:  # Matches employee sitting over or near chair
+                    match_score = max(iou, 0.25)
+
+                if match_score > max_iou:
+                    max_iou = match_score
+                    best_person = person
 
             if max_iou >= iou_thresh and best_person is not None:
                 self.occupied_counters[chair_id] += 1
@@ -112,7 +114,7 @@ class RuleChairStatus(BaseRule):
                 chair["matched_person_id"] = None
                 chair["matched_upper_body_bbox"] = None
 
-        # Step 2: Workstation Proximity Suppression Pass (160px Radius)
+        # Step 2: Workstation Proximity Suppression Pass (260px Radius)
         # Suppress any empty chair candidate located near an active working employee.
         for chair_id, chair in clean_chairs.items():
             if chair["status"] == "TIDAK DI TEMPAT":
@@ -124,7 +126,7 @@ class RuleChairStatus(BaseRule):
                         c_c = compute_centroid(chair["bbox"])
                         dist = math.hypot(p_c[0] - c_c[0], p_c[1] - c_c[1])
 
-                        if iou >= 0.10 or dist < 160.0:
+                        if iou >= 0.05 or dist < 260.0:
                             chair["suppressed"] = True
                             break
 

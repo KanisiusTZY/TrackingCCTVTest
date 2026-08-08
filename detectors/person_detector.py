@@ -4,11 +4,12 @@ import numpy as np
 class ObjectDetector:
     """
     Detects both 'person' (COCO class 0) and 'chair' (COCO class 56) using YOLOv8.
-    Applies class-specific confidence, dimension, and furniture sanity filters:
+    Applies tight torso upper-body cropping and furniture sanity filters:
     - Person: conf >= 0.22 (detects both foreground and distant background employees).
-    - Chair: conf >= 0.35, aspect ratio 0.65..2.2, filters out desk drawers, paper trays, and floor cabinets.
+      Upper Body BBox is tightly focused on head & torso (centered X-span 70%).
+    - Chair: conf >= 0.35, aspect ratio 0.65..2.2, filters out floor drawers & desks.
     """
-    def __init__(self, confidence_threshold=0.22, upper_body_ratio=0.55):
+    def __init__(self, confidence_threshold=0.22, upper_body_ratio=0.50):
         self.confidence_threshold = confidence_threshold
         self.upper_body_ratio = upper_body_ratio
         self.model = None
@@ -53,20 +54,22 @@ class ObjectDetector:
                     box_area = box_w * box_h
 
                     if cls_id == 0 and conf >= 0.22:
-                        # Person: accept both foreground and distant background persons
                         if box_w >= 15 and box_h >= 25 and box_w < int(w * 0.90) and box_h < int(h * 0.95):
+                            # Calculate tight upper body (head & torso focus)
                             y2_upper = y1 + int(box_h * ratio)
                             y2_upper = min(y2, max(y1 + 10, y2_upper))
 
+                            # Center 70% width crop for tight torso box
+                            margin_x = int(box_w * 0.12)
+                            x1_upper = x1 + margin_x
+                            x2_upper = x2 - margin_x
+
                             persons.append({
                                 "bbox": [x1, y1, x2, y2],
-                                "upper_body_bbox": [x1, y1, x2, y2_upper],
+                                "upper_body_bbox": [x1_upper, y1, x2_upper, y2_upper],
                                 "confidence": conf
                             })
                     elif cls_id == 56 and conf >= 0.35:
-                        # Chair filter:
-                        # 1. Aspect ratio: 0.65 <= h/w <= 2.2 (eliminates flat desk drawers)
-                        # 2. Rejection for floor-level paper trays / drawers under desk (y1 > 720 and x1 > 1000)
                         aspect_ratio = box_h / float(box_w)
                         is_desk_drawer = (y1 > 700 and x1 > 1050 and x2 < 1550)
 
