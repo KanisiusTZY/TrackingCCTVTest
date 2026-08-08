@@ -3,8 +3,10 @@ import numpy as np
 
 class ObjectDetector:
     """
-    Detects 'person' (COCO class 0) and 'chair' (COCO class 56) using YOLOv8 Pose & Object Models.
-    Integrates pose keypoint deduplication & YouTube screen-recording UI filtering.
+    Detects 'person' (COCO class 0) and 'chair' (COCO class 56) using YOLOv8/v11 + Pose.
+    Clean furniture filter:
+    - Person: High recall conf >= 0.08 + Pose Keypoints fallback (detects people facing away & behind monitors).
+    - Chair: Strict conf >= 0.45 + geometry filters to ELIMINATE paper trays, printers, monitors & desk corners.
     """
     def __init__(self, model_name='yolov8m.pt', confidence_threshold=0.08, upper_body_ratio=0.55):
         self.confidence_threshold = confidence_threshold
@@ -55,7 +57,7 @@ class ObjectDetector:
                     x2 = max(0, min(w - 1, x2))
                     y2 = max(0, min(h - 1, y2))
 
-                    # Ignore detections inside YouTube side recommendation UI or browser title bars
+                    # Ignore detections inside YouTube UI borders
                     if (y1 < 100 or y2 > h - 80) and (x1 < 250 or x2 > w - 250):
                         continue
 
@@ -63,7 +65,7 @@ class ObjectDetector:
                     box_h = y2 - y1
                     box_area = box_w * box_h
 
-                    if cls_id == 0 and conf >= 0.06:
+                    if cls_id == 0 and conf >= 0.08:
                         if box_w >= 8 and box_h >= 12 and box_w < int(w * 0.95) and box_h < int(h * 0.95):
                             y2_upper = y1 + int(box_h * max(ratio, 0.60))
                             y2_upper = min(y2, max(y1 + 10, y2_upper))
@@ -77,20 +79,22 @@ class ObjectDetector:
                                 "upper_body_bbox": [x1_upper, y1, x2_upper, y2_upper],
                                 "confidence": conf
                             })
-                    elif cls_id == 56 and conf >= 0.10:
+                    elif cls_id == 56 and conf >= 0.45:  # STRICT CONF >= 0.45 to eliminate false positive chairs
                         aspect_ratio = box_h / float(box_w)
-                        is_paper_tray_or_desk = (y1 > 680 and x1 > 980 and x2 < 1600)
-                        is_wall_cabinet = (x1 > 1250 and y2 < 550 and box_h < 200)
-                        is_flat_desk = (aspect_ratio < 0.45 and y1 > 450)
 
-                        if (0.45 <= aspect_ratio <= 2.5 and
-                            box_area >= 7000 and
-                            box_w >= 45 and
-                            box_h >= 50 and
-                            box_w <= 300 and box_h <= 380 and
-                            not is_paper_tray_or_desk and
-                            not is_wall_cabinet and
-                            not is_flat_desk):
+                        # Rejection filters for paper trays, printers, monitors, desks
+                        is_paper_tray = (y1 > 600 and x1 > 900 and x2 < 1600 and box_h < 180)
+                        is_printer_or_desk = (aspect_ratio < 0.60 or aspect_ratio > 2.2)
+                        is_wall_cabinet = (x1 > 1250 and y2 < 550 and box_h < 200)
+
+                        if (0.60 <= aspect_ratio <= 2.2 and
+                            box_area >= 12000 and
+                            box_w >= 60 and
+                            box_h >= 75 and
+                            box_w <= 280 and box_h <= 350 and
+                            not is_paper_tray and
+                            not is_printer_or_desk and
+                            not is_wall_cabinet):
 
                             chairs.append({
                                 "bbox": [x1, y1, x2, y2],
@@ -118,11 +122,9 @@ class ObjectDetector:
                                 px2 = min(w - 1, int(max(xs) + 20))
                                 py2 = min(h - 1, int(max(ys) + 40))
 
-                                # Ignore Pose keypoints inside YouTube side UI
                                 if (py1 < 100 or py2 > h - 80) and (px1 < 250 or px2 > w - 250):
                                     continue
 
-                                # Deduplicate against existing person bboxes
                                 covered = False
                                 for p in persons:
                                     x_overlap = min(px2, p["bbox"][2]) - max(px1, p["bbox"][0])
