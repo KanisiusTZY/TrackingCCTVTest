@@ -3,11 +3,10 @@ import numpy as np
 
 class ObjectDetector:
     """
-    Detects 'person' (COCO class 0) and 'chair' (COCO class 56) using YOLOv8.
-    Applies strict confidence, geometry, and spatial filters to eliminate false-positive
-    furniture detections (paper trays, desk surfaces, filing cabinets, monitors).
+    Detects both 'person' (COCO class 0) and 'chair' (COCO class 56) using YOLOv8.
+    Applies clean torso upper-body cropping and furniture sanity filters.
     """
-    def __init__(self, confidence_threshold=0.22, upper_body_ratio=0.50):
+    def __init__(self, confidence_threshold=0.20, upper_body_ratio=0.55):
         self.confidence_threshold = confidence_threshold
         self.upper_body_ratio = upper_body_ratio
         self.model = None
@@ -51,13 +50,13 @@ class ObjectDetector:
                     box_h = y2 - y1
                     box_area = box_w * box_h
 
-                    if cls_id == 0 and conf >= 0.22:
+                    if cls_id == 0 and conf >= 0.20:
                         # Person: accept both foreground and distant background employees
-                        if box_w >= 15 and box_h >= 25 and box_w < int(w * 0.90) and box_h < int(h * 0.95):
+                        if box_w >= 15 and box_h >= 25 and box_w < int(w * 0.95) and box_h < int(h * 0.98):
                             y2_upper = y1 + int(box_h * ratio)
                             y2_upper = min(y2, max(y1 + 10, y2_upper))
 
-                            margin_x = int(box_w * 0.10)
+                            margin_x = int(box_w * 0.08)
                             x1_upper = x1 + margin_x
                             x2_upper = x2 - margin_x
 
@@ -66,19 +65,19 @@ class ObjectDetector:
                                 "upper_body_bbox": [x1_upper, y1, x2_upper, y2_upper],
                                 "confidence": conf
                             })
-                    elif cls_id == 56 and conf >= 0.45:
+                    elif cls_id == 56 and conf >= 0.40:
                         # Chair filter:
-                        # 1. Require real chair dimensions (conf >= 0.45, area >= 18000, h >= 100, w >= 80)
-                        # 2. Aspect ratio constraint: 0.70 <= h/w <= 2.2 (eliminates flat desks & paper trays)
-                        # 3. Spatial rejection for paper trays & desk surfaces (y1 > 650 and x1 > 950)
+                        # 1. Require real chair dimensions (conf >= 0.40, area >= 14000, h >= 80, w >= 70)
+                        # 2. Aspect ratio constraint: 0.60 <= h/w <= 2.2
+                        # 3. Spatial rejection for paper trays & desk surfaces (y1 > 640 and x1 > 980)
                         aspect_ratio = box_h / float(box_w)
-                        is_paper_tray_or_desk = (y1 > 620 and x1 > 950 and x2 < 1600)
-                        is_flat_desk = (aspect_ratio < 0.75 and y1 > 400)
+                        is_paper_tray_or_desk = (y1 > 640 and x1 > 980 and x2 < 1600)
+                        is_flat_desk = (aspect_ratio < 0.65 and y1 > 400)
 
-                        if (0.70 <= aspect_ratio <= 2.2 and
-                            box_area >= 18000 and
-                            box_w >= 80 and
-                            box_h >= 100 and
+                        if (0.60 <= aspect_ratio <= 2.2 and
+                            box_area >= 14000 and
+                            box_w >= 70 and
+                            box_h >= 80 and
                             not is_paper_tray_or_desk and
                             not is_flat_desk):
 

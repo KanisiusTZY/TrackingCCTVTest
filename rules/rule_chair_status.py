@@ -26,13 +26,14 @@ def format_duration(seconds):
 
 class RuleChairStatus(BaseRule):
     """
-    Evaluates status per UNIQUE chair with X-Overlap Proximity & Total Workstation Suppression.
+    Evaluates status per UNIQUE chair.
 
     Guarantees:
     - EXACTLY ONE status per chair_id per frame.
-    - Matches employee to workstation if IoU >= 0.15 OR Distance < 260px OR X-Overlap >= 35%.
-    - Suppresses stray empty red boxes on chair backrests, monitors, desks, and paper trays
-      within 350px radius or X-Overlap >= 30% of ANY detected employee.
+    - Green upper-body box 'BEKERJA' is shown ONLY when an employee is physically seated at/over their chair!
+    - When an employee leaves their chair (e.g. walks to cabinet), the green box VANISHES from their body,
+      and the empty chair turns RED with 'TIDAK DI TEMPAT: XmYYs'.
+    - Suppresses stray empty red boxes on chair backrests/monitors near active seated employees.
     """
     def __init__(self, enabled=True):
         super().__init__(name="Dynamic Chair Status (BEKERJA / TIDAK DI TEMPAT)", rule_id="rule_chair_status", enabled=enabled)
@@ -45,7 +46,7 @@ class RuleChairStatus(BaseRule):
         if not self.enabled:
             return
 
-        iou_thresh = config["thresholds"].get("iou_chair_occupied", 0.15)
+        iou_thresh = config["thresholds"].get("iou_chair_occupied", 0.12)
         persistence = config["thresholds"].get("persistence_frames", 15)
 
         assigned_person_ids = set()
@@ -65,23 +66,21 @@ class RuleChairStatus(BaseRule):
 
             for person_id, person in tracked_persons.items():
                 if person_id in assigned_person_ids:
-                    continue  # 1 person assigned to max 1 chair
+                    continue
 
                 upper_bbox = person.get("upper_body_bbox", person["bbox"])
                 iou = compute_iou(chair_bbox, upper_bbox)
-                x_overlap = compute_x_overlap_ratio(chair_bbox, person["bbox"])
 
                 p_c = compute_centroid(person["bbox"])
                 c_c = compute_centroid(chair_bbox)
                 dist = math.hypot(p_c[0] - c_c[0], p_c[1] - c_c[1])
 
-                score = iou
-                if dist < 260.0 or x_overlap >= 0.35:
-                    score = max(score, 0.30)
-
-                if score > max_score:
-                    max_score = score
-                    best_person = person
+                # Seated check: Person must be over or within 130px of chair
+                if iou >= 0.10 or dist < 130.0:
+                    score = max(iou, 0.30 if dist < 130.0 else 0.0)
+                    if score > max_score:
+                        max_score = score
+                        best_person = person
 
             if max_score >= iou_thresh and best_person is not None:
                 self.occupied_counters[chair_id] += 1
@@ -116,29 +115,36 @@ class RuleChairStatus(BaseRule):
             chair["away_timer"] = self.away_timers[chair_id]
             chair["away_label"] = f"TIDAK DI TEMPAT: {format_duration(self.away_timers[chair_id])}"
 
+            # Crucial: Only attach upper body box if status is BEKERJA AND person is physically near chair (< 130px)
             if new_status == "BEKERJA" and best_person is not None:
-                chair["matched_person_id"] = best_person["id"]
-                chair["matched_upper_body_bbox"] = best_person.get("upper_body_bbox", best_person["bbox"])
+                p_c = compute_centroid(best_person["bbox"])
+                c_c = compute_centroid(chair_bbox)
+                dist = math.hypot(p_c[0] - c_c[0], p_c[1] - c_c[1])
+
+                if dist <= 130.0 or compute_iou(chair_bbox, best_person.get("upper_body_bbox", best_person["bbox"])) >= 0.10:
+                    chair["matched_person_id"] = best_person["id"]
+                    chair["matched_upper_body_bbox"] = best_person.get("upper_body_bbox", best_person["bbox"])
+                else:
+                    chair["matched_person_id"] = None
+                    chair["matched_upper_body_bbox"] = None
             else:
                 chair["matched_person_id"] = None
                 chair["matched_upper_body_bbox"] = None
 
-        # Step 2: Total Workstation Proximity & X-Overlap Suppression Pass (350px Radius / 30% X-Overlap)
-        # Suppress any empty chair candidate located near or sharing X-span with ANY detected employee
+        # Step 2: Workstation Proximity Suppression Pass for Seated Employees
         for chair_id, chair in clean_chairs.items():
             if chair["status"] == "TIDAK DI TEMPAT":
                 for person_id, person in tracked_persons.items():
-                    p_bbox = person["bbox"]
-                    iou = compute_iou(chair["bbox"], p_bbox)
-                    x_overlap = compute_x_overlap_ratio(chair["bbox"], p_bbox)
-                    p_c = compute_centroid(p_bbox)
-                    c_c = compute_centroid(chair["bbox"])
-                    dist = math.hypot(p_c[0] - c_c[0], p_c[1] - c_c[1])
+                    if person_id in assigned_person_ids:
+                        p_bbox = person["bbox"]
+                        iou = compute_iou(chair["bbox"], p_bbox)
+                        p_c = compute_centroid(p_bbox)
+                        c_c = compute_centroid(chair["bbox"])
+                        dist = math.hypot(p_c[0] - c_c[0], p_c[1] - c_c[1])
 
-                    # Suppress empty chair if it overlaps or is near any employee's workstation
-                    if iou >= 0.05 or dist < 350.0 or x_overlap >= 0.30:
-                        chair["suppressed"] = True
-                        break
+                        if iou >= 0.08 or dist < 200.0:
+                            chair["suppressed"] = True
+                            break
 
         stale_cids = [cid for cid in self.prev_status if cid not in clean_chairs]
         for cid in stale_cids:

@@ -16,15 +16,15 @@ def compute_horizontal_overlap_ratio(bbox1, bbox2):
 
 class ChairRegistry:
     """
-    Refined Chair Registry with Aggressive NMS (180px distance & 35% X-overlap).
+    Chair Registry with Seated Employee Bootstrap & Unique Workstation Management.
 
     Guarantees:
-    1. Exactly 1 chair box per physical workstation (merges backrest, seat, and desk area).
-    2. Fast Person-Bootstrap (15 frames) for seated employees.
-    3. Keeps registry 100% deduplicated every frame.
+    1. Synthesizes chair candidates for all seated employees (including foreground & background).
+    2. Merges duplicate detections for the same physical chair.
+    3. Keeps registry deduplicated every frame.
     """
 
-    def __init__(self, iou_threshold=0.25, min_confidence=0.45, bootstrap_persistence=15):
+    def __init__(self, iou_threshold=0.30, min_confidence=0.40, bootstrap_persistence=10):
         self.iou_threshold = iou_threshold
         self.min_confidence = min_confidence
         self.bootstrap_persistence = bootstrap_persistence
@@ -61,14 +61,14 @@ class ChairRegistry:
                     "priority": 2
                 })
 
-        # 1c. Person-Bootstrap Candidates
+        # 1c. Person-Bootstrap Candidates for Seated Employees
         if tracked_persons:
             bootstrap_candidates = self._generate_bootstrap_candidates(tracked_persons, all_candidates)
             all_candidates.extend(bootstrap_candidates)
 
         total_candidate_count = len(all_candidates)
 
-        # 2. Aggressive Global NMS / Centroid / Horizontal Overlap Merge
+        # 2. Global NMS Merge
         clean_chairs = self._global_nms_merge(all_candidates, frame_count)
 
         # 3. Replace self.registry completely
@@ -96,7 +96,7 @@ class ChairRegistry:
                 prev_c = self.person_stability[pid]["centroid"]
                 dist = math.hypot(centroid[0] - prev_c[0], centroid[1] - prev_c[1])
 
-                if dist < 45.0:  # Natural head & arm typing movement
+                if dist < 50.0:  # Seated typing/working movement tolerance
                     self.person_stability[pid]["frames"] += 1
                     self.person_stability[pid]["last_bbox"] = full_bbox
                 else:
@@ -112,9 +112,9 @@ class ChairRegistry:
                 pw = max(1, px2 - px1)
                 ph = max(1, py2 - py1)
 
-                seat_y1 = py1 + int(ph * 0.45)
+                seat_y1 = py1 + int(ph * 0.40)
                 seat_y2 = py2
-                pad_x = int(pw * 0.15)
+                pad_x = int(pw * 0.10)
                 est_bbox = [max(0, px1 - pad_x), seat_y1, px2 + pad_x, seat_y2]
 
                 already_has_chair = False
@@ -123,9 +123,8 @@ class ChairRegistry:
                     c2 = compute_centroid(cand["bbox"])
                     dist = math.hypot(c1[0] - c2[0], c1[1] - c2[1])
                     iou = compute_iou(est_bbox, cand["bbox"])
-                    h_overlap = compute_horizontal_overlap_ratio(est_bbox, cand["bbox"])
 
-                    if iou >= 0.15 or dist < 160.0 or h_overlap >= 0.35:
+                    if iou >= 0.25 or dist < 70.0:
                         already_has_chair = True
                         break
 
@@ -135,9 +134,8 @@ class ChairRegistry:
                         c2 = compute_centroid(b_item["bbox"])
                         dist = math.hypot(c1[0] - c2[0], c1[1] - c2[1])
                         iou = compute_iou(est_bbox, b_item["bbox"])
-                        h_overlap = compute_horizontal_overlap_ratio(est_bbox, b_item["bbox"])
 
-                        if iou >= 0.15 or dist < 160.0 or h_overlap >= 0.35:
+                        if iou >= 0.25 or dist < 70.0:
                             already_has_chair = True
                             break
 
@@ -194,19 +192,22 @@ class ChairRegistry:
                 dist = math.hypot(c1[0] - c2[0], c1[1] - c2[1])
                 h_overlap = compute_horizontal_overlap_ratio(best_bbox, cand["bbox"])
 
-                # Aggressive merge condition: IoU >= 0.25 OR Distance < 180px OR X-Overlap >= 35%
-                if iou >= self.iou_threshold or dist < 180.0 or h_overlap >= 0.35:
+                same_column = (h_overlap >= 0.60 and abs(c1[0] - c2[0]) < 80.0)
+
+                if iou >= self.iou_threshold or dist < 90.0 or same_column:
                     used[j] = True
 
-                    # Enclose combined bounding box
-                    best_bbox = [
-                        min(best_bbox[0], cand["bbox"][0]),
-                        min(best_bbox[1], cand["bbox"][1]),
-                        max(best_bbox[2], cand["bbox"][2]),
-                        max(best_bbox[3], cand["bbox"][3])
-                    ]
+                    if same_column:
+                        best_bbox = [
+                            min(best_bbox[0], cand["bbox"][0]),
+                            min(best_bbox[1], cand["bbox"][1]),
+                            max(best_bbox[2], cand["bbox"][2]),
+                            max(best_bbox[3], cand["bbox"][3])
+                        ]
 
                     if not cand["is_bootstrap"] and is_bootstrap:
+                        if not same_column:
+                            best_bbox = list(cand["bbox"])
                         is_bootstrap = False
                         best_conf = max(best_conf, cand["conf"])
 
