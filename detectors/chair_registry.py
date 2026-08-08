@@ -16,14 +16,12 @@ def compute_horizontal_overlap_ratio(bbox1, bbox2):
 
 class ChairRegistry:
     """
-    Universal Seated Workstation Chair Registry.
+    Universal Stable Chair Registry with Fixed Workstation IDs.
 
     Guarantees:
-    1. Every tracked seated employee (even facing away, or occluded behind monitors)
-       AUTOMATICALLY gets a workstation chair entry in the registry on Frame 1.
-    2. Rejects standing upright persons (h/w >= 1.75 & h >= 240px).
-    3. Keeps registered workstation chairs persistent for 150 frames.
-    4. Deduplicates overlapping chair entries cleanly (1 box per person).
+    1. STABLE Chair IDs: Reuses existing registry chair IDs so boxes NEVER flicker / putus-putus.
+    2. Capped Chair Dimensions (W <= 280px, H <= 350px): 100% prevents giant ballooning red boxes.
+    3. Instant 1-frame workstation chair generation for all seated employees.
     """
 
     def __init__(self, model_name='yolov8m.pt', iou_threshold=0.20, min_confidence=0.10, bootstrap_persistence=1):
@@ -46,7 +44,7 @@ class ChairRegistry:
                     "age": entry["age"] + 1,
                     "is_bootstrap": entry.get("is_bootstrap", False),
                     "source": "registry",
-                    "priority": 2 if not entry.get("is_bootstrap") else 1
+                    "priority": 3 if not entry.get("is_bootstrap") else 2
                 })
 
         # 1b. Live YOLO Chair Detections
@@ -60,17 +58,17 @@ class ChairRegistry:
                     "age": 0,
                     "is_bootstrap": False,
                     "source": "yolo",
-                    "priority": 3
+                    "priority": 4
                 })
 
-        # 1c. Instant Person-Workstation Candidates for EVERY Seated Employee
+        # 1c. Instant Person-Workstation Candidates for SEATED Employees ONLY
         if tracked_persons:
             bootstrap_candidates = self._generate_bootstrap_candidates(tracked_persons, all_candidates)
             all_candidates.extend(bootstrap_candidates)
 
         total_candidate_count = len(all_candidates)
 
-        # 2. Global NMS & Centroid Deduplication
+        # 2. Global NMS & Centroid Deduplication with STABLE ID MATCHER
         clean_chairs = self._global_nms_merge(all_candidates, frame_count)
 
         # 3. Replace self.registry completely
@@ -95,8 +93,7 @@ class ChairRegistry:
             if is_standing:
                 continue
 
-            # Synthesize workstation seat box for the seated employee
-            seat_y1 = py1 + int(ph * 0.20)
+            seat_y1 = py1 + int(ph * 0.25)
             seat_y2 = py2
             pad_x = int(pw * 0.05)
             est_bbox = [max(0, px1 - pad_x), seat_y1, min(1920, px2 + pad_x), seat_y2]
@@ -109,7 +106,7 @@ class ChairRegistry:
                 iou = compute_iou(est_bbox, cand["bbox"])
                 h_overlap = compute_horizontal_overlap_ratio(est_bbox, cand["bbox"])
 
-                if iou >= 0.12 or dist < 120.0 or h_overlap >= 0.30:
+                if iou >= 0.15 or dist < 120.0 or h_overlap >= 0.30:
                     already_has_chair = True
                     break
 
@@ -117,7 +114,7 @@ class ChairRegistry:
                 bootstrap_list.append({
                     "id": None,
                     "bbox": est_bbox,
-                    "conf": 0.70,
+                    "conf": 0.60,
                     "age": 0,
                     "is_bootstrap": True,
                     "source": "bootstrap",
@@ -142,9 +139,28 @@ class ChairRegistry:
             anchor = candidates[i]
             used[i] = True
 
-            chair_id = anchor["id"] if anchor["id"] is not None else self.next_chair_id
-            if anchor["id"] is None:
-                self.next_chair_id += 1
+            # STABLE CHAIR ID MATCHING:
+            # Check if anchor matches an existing chair in self.registry to REUSE its chair_id
+            chair_id = anchor["id"]
+            if chair_id is None:
+                anchor_c = compute_centroid(anchor["bbox"])
+                best_existing_id = None
+                min_d = 160.0
+
+                for reg_id, reg_entry in self.registry.items():
+                    reg_c = compute_centroid(reg_entry["bbox"])
+                    d = math.hypot(anchor_c[0] - reg_c[0], anchor_c[1] - reg_c[1])
+                    iou = compute_iou(anchor["bbox"], reg_entry["bbox"])
+
+                    if (d < min_d or iou >= 0.20) and reg_id not in merged_result:
+                        min_d = d
+                        best_existing_id = reg_id
+
+                if best_existing_id is not None:
+                    chair_id = best_existing_id
+                else:
+                    chair_id = self.next_chair_id
+                    self.next_chair_id += 1
 
             best_bbox = list(anchor["bbox"])
             best_conf = anchor["conf"]
@@ -166,16 +182,22 @@ class ChairRegistry:
                 dist = math.hypot(c1[0] - c2[0], c1[1] - c2[1])
                 h_overlap = compute_horizontal_overlap_ratio(best_bbox, cand["bbox"])
 
-                # Aggressive workstation NMS merge (IoU >= 0.15 OR dist < 150px OR X-overlap >= 30%)
-                if iou >= self.iou_threshold or dist < 150.0 or h_overlap >= 0.30:
+                if iou >= self.iou_threshold or dist < 140.0 or h_overlap >= 0.30:
                     used[j] = True
 
-                    best_bbox = [
-                        min(best_bbox[0], cand["bbox"][0]),
-                        min(best_bbox[1], cand["bbox"][1]),
-                        max(best_bbox[2], cand["bbox"][2]),
-                        max(best_bbox[3], cand["bbox"][3])
-                    ]
+                    # Test expanded candidate dimensions
+                    exp_x1 = min(best_bbox[0], cand["bbox"][0])
+                    exp_y1 = min(best_bbox[1], cand["bbox"][1])
+                    exp_x2 = max(best_bbox[2], cand["bbox"][2])
+                    exp_y2 = max(best_bbox[3], cand["bbox"][3])
+
+                    exp_w = exp_x2 - exp_x1
+                    exp_h = exp_y2 - exp_y1
+
+                    # CRITICAL FIX: DO NOT EXPAND CHAIR BBOX BEYOND REAL CHAIR DIMENSIONS (W <= 280px, H <= 350px)
+                    # Prevents giant ballooning red boxes across the entire room!
+                    if exp_w <= 280 and exp_h <= 350:
+                        best_bbox = [exp_x1, exp_y1, exp_x2, exp_y2]
 
                     if not cand["is_bootstrap"]:
                         is_bootstrap = False
