@@ -16,13 +16,13 @@ def compute_horizontal_overlap_ratio(bbox1, bbox2):
 
 class ChairRegistry:
     """
-    Persistent Chair Registry with Workstation Isolation & Standing Person Rejection.
+    Instant Chair Registry with Seated Workstation Isolation & Standing Person Rejection.
 
     Guarantees:
-    1. Keeps registered workstation chairs persistent for 150 frames so red boxes on empty chairs NEVER vanish.
-    2. Rejects bootstrap candidates for standing upright persons (h/w >= 1.75).
-    3. Fast 5-frame bootstrap for seated employees (Foreground, Blonde, Background).
-    4. Merges duplicate workstation bboxes into 1 clean box per workstation.
+    1. INSTANT 1-frame chair candidate generation for ANY seated employee (Foreground, Blonde, Background, Right Desk).
+    2. Zero lag: Seated employees immediately get a green upper-body box 'BEKERJA'.
+    3. Rejects bootstrap candidates for standing upright persons (h/w >= 1.75 & h >= 240px).
+    4. Keeps registered workstation chairs persistent for 150 frames.
     """
 
     def __init__(self, iou_threshold=0.20, min_confidence=0.18, bootstrap_persistence=5):
@@ -31,12 +31,11 @@ class ChairRegistry:
         self.bootstrap_persistence = bootstrap_persistence
         self.next_chair_id = 1
         self.registry = {}
-        self.person_stability = {}
 
     def process_frame(self, frame_count, live_chair_detections, tracked_persons=None):
         all_candidates = []
 
-        # 1a. Existing Registry Chairs (Keep alive for 150 frames ~ 5 seconds)
+        # 1a. Existing Registry Chairs (Keep persistent for 150 frames ~ 5s)
         for cid, entry in list(self.registry.items()):
             if frame_count - entry.get("last_seen_frame", frame_count) < 150:
                 all_candidates.append({
@@ -63,7 +62,7 @@ class ChairRegistry:
                     "priority": 3
                 })
 
-        # 1c. Person-Bootstrap Candidates for SEATED Employees ONLY (Rejects Standing Persons)
+        # 1c. Instant Person-Bootstrap Candidates for SEATED Employees ONLY
         if tracked_persons:
             bootstrap_candidates = self._generate_bootstrap_candidates(tracked_persons, all_candidates)
             all_candidates.extend(bootstrap_candidates)
@@ -82,7 +81,6 @@ class ChairRegistry:
 
     def _generate_bootstrap_candidates(self, tracked_persons, existing_candidates):
         bootstrap_list = []
-        active_pids = set(tracked_persons.keys())
 
         for pid, person in tracked_persons.items():
             full_bbox = person["bbox"]
@@ -91,70 +89,39 @@ class ChairRegistry:
             ph = max(1, py2 - py1)
             aspect_ratio = ph / float(pw)
 
-            # REJECT STANDING PERSONS: Standing upright persons (aspect ratio >= 1.75 & ph >= 250px) cannot be seated!
-            is_standing = (aspect_ratio >= 1.75 and ph >= 250)
+            # REJECT STANDING PERSONS: Standing upright persons (aspect ratio >= 1.75 & ph >= 240px) cannot be seated!
+            is_standing = (aspect_ratio >= 1.75 and ph >= 240)
             if is_standing:
                 continue
 
-            centroid = compute_centroid(full_bbox)
+            # Instant workstation seat box for seated employees
+            seat_y1 = py1 + int(ph * 0.30)
+            seat_y2 = py2
+            pad_x = int(pw * 0.05)
+            est_bbox = [max(0, px1 - pad_x), seat_y1, px2 + pad_x, seat_y2]
 
-            if pid not in self.person_stability:
-                self.person_stability[pid] = {
-                    "centroid": centroid,
-                    "frames": 1,
-                    "last_bbox": full_bbox
-                }
-            else:
-                prev_c = self.person_stability[pid]["centroid"]
-                dist = math.hypot(centroid[0] - prev_c[0], centroid[1] - prev_c[1])
+            already_has_chair = False
+            for cand in existing_candidates:
+                c1 = compute_centroid(est_bbox)
+                c2 = compute_centroid(cand["bbox"])
+                dist = math.hypot(c1[0] - c2[0], c1[1] - c2[1])
+                iou = compute_iou(est_bbox, cand["bbox"])
+                h_overlap = compute_horizontal_overlap_ratio(est_bbox, cand["bbox"])
 
-                if dist < 50.0:  # Seated typing/working movement tolerance
-                    self.person_stability[pid]["frames"] += 1
-                    self.person_stability[pid]["last_bbox"] = full_bbox
-                else:
-                    self.person_stability[pid] = {
-                        "centroid": centroid,
-                        "frames": 1,
-                        "last_bbox": full_bbox
-                    }
+                if iou >= 0.15 or dist < 110.0 or h_overlap >= 0.30:
+                    already_has_chair = True
+                    break
 
-            if self.person_stability[pid]["frames"] >= self.bootstrap_persistence:
-                p_bbox = self.person_stability[pid]["last_bbox"]
-                px1, py1, px2, py2 = p_bbox
-                pw = max(1, px2 - px1)
-                ph = max(1, py2 - py1)
-
-                seat_y1 = py1 + int(ph * 0.35)
-                seat_y2 = py2
-                pad_x = int(pw * 0.05)
-                est_bbox = [max(0, px1 - pad_x), seat_y1, px2 + pad_x, seat_y2]
-
-                already_has_chair = False
-                for cand in existing_candidates:
-                    c1 = compute_centroid(est_bbox)
-                    c2 = compute_centroid(cand["bbox"])
-                    dist = math.hypot(c1[0] - c2[0], c1[1] - c2[1])
-                    iou = compute_iou(est_bbox, cand["bbox"])
-                    h_overlap = compute_horizontal_overlap_ratio(est_bbox, cand["bbox"])
-
-                    if iou >= 0.15 or dist < 100.0 or h_overlap >= 0.30:
-                        already_has_chair = True
-                        break
-
-                if not already_has_chair:
-                    bootstrap_list.append({
-                        "id": None,
-                        "bbox": est_bbox,
-                        "conf": 0.50,
-                        "age": 0,
-                        "is_bootstrap": True,
-                        "source": "bootstrap",
-                        "priority": 1
-                    })
-
-        stale_pids = [p for p in self.person_stability if p not in active_pids]
-        for p in stale_pids:
-            del self.person_stability[p]
+            if not already_has_chair:
+                bootstrap_list.append({
+                    "id": None,
+                    "bbox": est_bbox,
+                    "conf": 0.60,
+                    "age": 0,
+                    "is_bootstrap": True,
+                    "source": "bootstrap",
+                    "priority": 1
+                })
 
         return bootstrap_list
 
@@ -198,8 +165,8 @@ class ChairRegistry:
                 dist = math.hypot(c1[0] - c2[0], c1[1] - c2[1])
                 h_overlap = compute_horizontal_overlap_ratio(best_bbox, cand["bbox"])
 
-                # Aggressive workstation NMS merge (IoU >= 0.18 OR dist < 130px OR X-overlap >= 30%)
-                if iou >= self.iou_threshold or dist < 130.0 or h_overlap >= 0.30:
+                # Aggressive workstation NMS merge (IoU >= 0.18 OR dist < 140px OR X-overlap >= 30%)
+                if iou >= self.iou_threshold or dist < 140.0 or h_overlap >= 0.30:
                     used[j] = True
 
                     best_bbox = [

@@ -26,12 +26,12 @@ def format_duration(seconds):
 
 class RuleChairStatus(BaseRule):
     """
-    Evaluates status per UNIQUE chair with Workstation Distance Matching & Unsuppressed Away Red Boxes.
+    Evaluates status per UNIQUE chair with Instant Workstation Matching & Immediate Away Red Boxes.
 
     Guarantees:
-    - Seated employee sitting leaning forward (dist <= 260px) gets GREEN box 'BEKERJA'.
-    - When employee stands up and walks away (standing upright H/W >= 1.75 or dy >= 150px),
-      the empty chair is NOT suppressed and turns RED 'TIDAK DI TEMPAT: XmYYs'.
+    - Seated employees (Foreground, Blonde, Background, Right Desk) immediately get GREEN box 'BEKERJA'.
+    - Standing upright employees at filing cabinet NEVER get a green box.
+    - When an employee stands up and walks away to cabinet, their empty workstation chair immediately turns RED 'TIDAK DI TEMPAT'.
     """
     def __init__(self, enabled=True):
         super().__init__(name="Dynamic Chair Status (BEKERJA / TIDAK DI TEMPAT)", rule_id="rule_chair_status", enabled=enabled)
@@ -44,8 +44,8 @@ class RuleChairStatus(BaseRule):
         if not self.enabled:
             return
 
-        iou_thresh = config["thresholds"].get("iou_chair_occupied", 0.10)
-        persistence = config["thresholds"].get("persistence_frames", 6)
+        iou_thresh = config["thresholds"].get("iou_chair_occupied", 0.05)
+        persistence = 2  # Instant response (2 frames)
 
         assigned_person_ids = set()
 
@@ -72,8 +72,8 @@ class RuleChairStatus(BaseRule):
                 ph = max(1, py2 - py1)
                 aspect_ratio = ph / float(pw)
 
-                # Standing upright check: Standing upright persons (H/W >= 1.75 and H >= 250px) cannot be seated!
-                is_standing_upright = (aspect_ratio >= 1.75 and ph >= 250)
+                # Standing upright check: Standing upright persons (H/W >= 1.75 and H >= 240px) cannot be seated!
+                is_standing_upright = (aspect_ratio >= 1.75 and ph >= 240)
                 if is_standing_upright:
                     continue
 
@@ -85,9 +85,9 @@ class RuleChairStatus(BaseRule):
                 dist = math.hypot(p_c[0] - c_c[0], p_c[1] - c_c[1])
                 x_overlap = compute_x_overlap_ratio(chair_bbox, full_bbox)
 
-                # Seated check: Seated employee leaning forward at desk can be up to 260px from chair backrest
-                if iou >= 0.05 or dist < 260.0 or x_overlap >= 0.25:
-                    score = max(iou, 0.35 if dist < 260.0 else 0.0)
+                # Seated check: Seated employee at workstation matching
+                if iou >= 0.05 or dist < 280.0 or x_overlap >= 0.25:
+                    score = max(iou, 0.40 if dist < 280.0 else 0.0)
                     if score > max_score:
                         max_score = score
                         best_person = person
@@ -133,7 +133,7 @@ class RuleChairStatus(BaseRule):
                 chair["matched_upper_body_bbox"] = None
 
         # Step 2: Selective Suppression Pass for Seated Workstations ONLY
-        # DO NOT suppress an empty chair if the person is standing upright (H/W >= 1.75) or has walked away (dy >= 150px)
+        # DO NOT suppress an empty chair if the person is standing upright (H/W >= 1.75) or has walked away (dy >= 120px)
         for chair_id, chair in clean_chairs.items():
             if chair["status"] == "TIDAK DI TEMPAT":
                 for person_id, person in tracked_persons.items():
@@ -143,14 +143,13 @@ class RuleChairStatus(BaseRule):
                     ph = max(1, py2 - py1)
                     aspect_ratio = ph / float(pw)
 
-                    is_standing_upright = (aspect_ratio >= 1.75 and ph >= 250)
+                    is_standing_upright = (aspect_ratio >= 1.75 and ph >= 240)
 
                     p_c = compute_centroid(p_bbox)
                     c_c = compute_centroid(chair["bbox"])
                     dist = math.hypot(p_c[0] - c_c[0], p_c[1] - c_c[1])
                     dy = abs(p_c[1] - c_c[1])
 
-                    # Only suppress if person is SEATED nearby (not standing upright and dy < 120px)
                     if not is_standing_upright and dy < 120.0 and dist < 180.0:
                         chair["suppressed"] = True
                         break
