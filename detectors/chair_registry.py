@@ -2,29 +2,16 @@ import math
 import numpy as np
 from tracker import compute_iou, compute_centroid
 
-def compute_horizontal_overlap_ratio(bbox1, bbox2):
-    x1 = max(bbox1[0], bbox2[0])
-    x2 = min(bbox1[2], bbox2[2])
-    inter_x = max(0, x2 - x1)
-
-    w1 = max(1, bbox1[2] - bbox1[0])
-    w2 = max(1, bbox2[2] - bbox2[0])
-    min_w = min(w1, w2)
-
-    return inter_x / float(min_w)
-
-
 class ChairRegistry:
     """
-    Chair Registry with Unique Workstation NMS Management.
+    Chair Registry with Workstation Isolation & Person-Bootstrap.
 
     Guarantees:
-    1. Exactly ONE chair box for the wheelchair on the right side of the room.
-    2. Fast Person-Bootstrap (10 frames) for seated employees.
-    3. Keeps registry deduplicated every frame.
+    1. Dedicated chair candidate for each seated workstation (Foreground, Blonde, Background).
+    2. Keeps registry deduplicated per workstation.
     """
 
-    def __init__(self, iou_threshold=0.25, min_confidence=0.40, bootstrap_persistence=10):
+    def __init__(self, iou_threshold=0.25, min_confidence=0.35, bootstrap_persistence=8):
         self.iou_threshold = iou_threshold
         self.min_confidence = min_confidence
         self.bootstrap_persistence = bootstrap_persistence
@@ -112,9 +99,9 @@ class ChairRegistry:
                 pw = max(1, px2 - px1)
                 ph = max(1, py2 - py1)
 
-                seat_y1 = py1 + int(ph * 0.40)
+                seat_y1 = py1 + int(ph * 0.35)
                 seat_y2 = py2
-                pad_x = int(pw * 0.10)
+                pad_x = int(pw * 0.05)
                 est_bbox = [max(0, px1 - pad_x), seat_y1, px2 + pad_x, seat_y2]
 
                 already_has_chair = False
@@ -124,20 +111,10 @@ class ChairRegistry:
                     dist = math.hypot(c1[0] - c2[0], c1[1] - c2[1])
                     iou = compute_iou(est_bbox, cand["bbox"])
 
-                    if iou >= 0.25 or dist < 70.0:
+                    # Require IoU >= 0.35 or dist < 60px to consider duplicate
+                    if iou >= 0.35 or dist < 60.0:
                         already_has_chair = True
                         break
-
-                if not already_has_chair:
-                    for b_item in bootstrap_list:
-                        c1 = compute_centroid(est_bbox)
-                        c2 = compute_centroid(b_item["bbox"])
-                        dist = math.hypot(c1[0] - c2[0], c1[1] - c2[1])
-                        iou = compute_iou(est_bbox, b_item["bbox"])
-
-                        if iou >= 0.25 or dist < 70.0:
-                            already_has_chair = True
-                            break
 
                 if not already_has_chair:
                     bootstrap_list.append({
@@ -190,15 +167,13 @@ class ChairRegistry:
                 c1 = compute_centroid(best_bbox)
                 c2 = compute_centroid(cand["bbox"])
                 dist = math.hypot(c1[0] - c2[0], c1[1] - c2[1])
-                h_overlap = compute_horizontal_overlap_ratio(best_bbox, cand["bbox"])
 
-                same_column = (h_overlap >= 0.40 and abs(c1[0] - c2[0]) < 120.0)
-                is_right_area = (c1[0] > 1100 or c2[0] > 1100)
+                # Do NOT merge chairs if vertical Y distance > 80px (separate workstations vertically)
+                dy = abs(c1[1] - c2[1])
+                dx = abs(c1[0] - c2[0])
 
-                # Merge condition: IoU >= 0.25 OR Distance < 110px (or 200px on right area) OR same vertical column
-                if iou >= self.iou_threshold or dist < (200.0 if is_right_area else 110.0) or same_column:
+                if (iou >= self.iou_threshold or dist < 70.0) and dy < 80.0:
                     used[j] = True
-
                     best_bbox = [
                         min(best_bbox[0], cand["bbox"][0]),
                         min(best_bbox[1], cand["bbox"][1]),

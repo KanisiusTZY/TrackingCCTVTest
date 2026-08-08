@@ -2,15 +2,6 @@ from rules.base_rule import BaseRule
 from tracker import compute_iou, compute_centroid
 import math
 
-def compute_x_overlap_ratio(bbox1, bbox2):
-    x1 = max(bbox1[0], bbox2[0])
-    x2 = min(bbox1[2], bbox2[2])
-    inter_x = max(0, x2 - x1)
-    w1 = max(1, bbox1[2] - bbox1[0])
-    w2 = max(1, bbox2[2] - bbox2[0])
-    min_w = min(w1, w2)
-    return inter_x / float(min_w)
-
 def format_duration(seconds):
     total_sec = int(seconds)
     hours = total_sec // 3600
@@ -26,12 +17,13 @@ def format_duration(seconds):
 
 class RuleChairStatus(BaseRule):
     """
-    Evaluates status per UNIQUE chair with Standing/Moving Person Workstation Suppression.
+    Evaluates status per UNIQUE chair with Workstation Proximity Matching & Person-Exclusivity.
 
     Guarantees:
     - EXACTLY ONE status per chair_id per frame.
-    - Green upper-body box 'BEKERJA' is shown ONLY when an employee is physically seated at/over their chair!
-    - Suppresses false-positive chair candidates on standing employees (e.g. man at cabinet) or near active employees.
+    - Seated employees (Foreground, Blonde, Background) each get their own GREEN box 'BEKERJA'.
+    - Standing employees away from seat (dist > 120px) lose their GREEN box immediately,
+      and their empty chair turns RED with 'TIDAK DI TEMPAT: XmYYs'.
     """
     def __init__(self, enabled=True):
         super().__init__(name="Dynamic Chair Status (BEKERJA / TIDAK DI TEMPAT)", rule_id="rule_chair_status", enabled=enabled)
@@ -44,12 +36,12 @@ class RuleChairStatus(BaseRule):
         if not self.enabled:
             return
 
-        iou_thresh = config["thresholds"].get("iou_chair_occupied", 0.12)
-        persistence = config["thresholds"].get("persistence_frames", 15)
+        iou_thresh = config["thresholds"].get("iou_chair_occupied", 0.10)
+        persistence = config["thresholds"].get("persistence_frames", 10)
 
         assigned_person_ids = set()
 
-        # Step 1: First pass — evaluate occupancy per chair
+        # Step 1: Evaluate occupancy per chair
         for chair_id, chair in clean_chairs.items():
             chair_bbox = chair["bbox"]
 
@@ -64,7 +56,7 @@ class RuleChairStatus(BaseRule):
 
             for person_id, person in tracked_persons.items():
                 if person_id in assigned_person_ids:
-                    continue
+                    continue  # Ensure 1 person matches max 1 chair
 
                 upper_bbox = person.get("upper_body_bbox", person["bbox"])
                 iou = compute_iou(chair_bbox, upper_bbox)
@@ -72,10 +64,11 @@ class RuleChairStatus(BaseRule):
                 p_c = compute_centroid(person["bbox"])
                 c_c = compute_centroid(chair_bbox)
                 dist = math.hypot(p_c[0] - c_c[0], p_c[1] - c_c[1])
+                dy = abs(p_c[1] - c_c[1])
 
-                # Seated check: Person must be over or within 130px of chair
-                if iou >= 0.10 or dist < 130.0:
-                    score = max(iou, 0.30 if dist < 130.0 else 0.0)
+                # Seated check: Person must be physically over or within 120px of chair
+                if iou >= 0.08 or (dist < 120.0 and dy < 80.0):
+                    score = max(iou, 0.30 if dist < 120.0 else 0.0)
                     if score > max_score:
                         max_score = score
                         best_person = person
@@ -113,13 +106,13 @@ class RuleChairStatus(BaseRule):
             chair["away_timer"] = self.away_timers[chair_id]
             chair["away_label"] = f"TIDAK DI TEMPAT: {format_duration(self.away_timers[chair_id])}"
 
-            # Only attach upper body box if status is BEKERJA AND person is physically near chair (< 130px)
+            # Only attach upper body box if status is BEKERJA AND person is physically near chair (< 120px)
             if new_status == "BEKERJA" and best_person is not None:
                 p_c = compute_centroid(best_person["bbox"])
                 c_c = compute_centroid(chair_bbox)
                 dist = math.hypot(p_c[0] - c_c[0], p_c[1] - c_c[1])
 
-                if dist <= 130.0 or compute_iou(chair_bbox, best_person.get("upper_body_bbox", best_person["bbox"])) >= 0.10:
+                if dist <= 120.0 or compute_iou(chair_bbox, best_person.get("upper_body_bbox", best_person["bbox"])) >= 0.08:
                     chair["matched_person_id"] = best_person["id"]
                     chair["matched_upper_body_bbox"] = best_person.get("upper_body_bbox", best_person["bbox"])
                 else:
@@ -129,22 +122,20 @@ class RuleChairStatus(BaseRule):
                 chair["matched_person_id"] = None
                 chair["matched_upper_body_bbox"] = None
 
-        # Step 2: Total Workstation & Standing-Person Suppression Pass
-        # Suppress any empty chair candidate located near ANY detected person (seated or standing)
+        # Step 2: Workstation Proximity Suppression Pass for Seated Employees
         for chair_id, chair in clean_chairs.items():
             if chair["status"] == "TIDAK DI TEMPAT":
                 for person_id, person in tracked_persons.items():
-                    p_bbox = person["bbox"]
-                    iou = compute_iou(chair["bbox"], p_bbox)
-                    p_c = compute_centroid(p_bbox)
-                    c_c = compute_centroid(chair["bbox"])
-                    dist = math.hypot(p_c[0] - c_c[0], p_c[1] - c_c[1])
-                    x_overlap = compute_x_overlap_ratio(chair["bbox"], p_bbox)
+                    if person_id in assigned_person_ids:
+                        p_bbox = person["bbox"]
+                        iou = compute_iou(chair["bbox"], p_bbox)
+                        p_c = compute_centroid(p_bbox)
+                        c_c = compute_centroid(chair["bbox"])
+                        dist = math.hypot(p_c[0] - c_c[0], p_c[1] - c_c[1])
 
-                    # Suppress false-positive empty chairs on or near standing persons (dist < 260px or x_overlap >= 30%)
-                    if iou >= 0.05 or dist < 260.0 or x_overlap >= 0.30:
-                        chair["suppressed"] = True
-                        break
+                        if iou >= 0.08 or dist < 160.0:
+                            chair["suppressed"] = True
+                            break
 
         stale_cids = [cid for cid in self.prev_status if cid not in clean_chairs]
         for cid in stale_cids:
