@@ -14,13 +14,15 @@
   "thresholds": {
     "iou_chair_occupied": 0.20,
     "proximity_interaction_px": 180,
-    "persistence_frames": 15,
-    "recline_hw_ratio": 1.25
+    "persistence_frames": 20,
+    "recline_hw_ratio": 1.6,
+    "recline_angle_upright": 60,
+    "recline_angle_reclining": 40
   },
   "rules_enabled": {
     "rule1_on_duty": true,
     "rule2_skiving": true,
     "rule3_empty_seat": true,
-    "rule4_opposite_gender": true
+    "rule4_opposite_gender": false
   }
 }

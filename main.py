@@ -59,7 +59,11 @@ def main():
     print("[INFO] Initializing Skynet Computer Vision modules...")
     person_detector = PersonDetector(confidence_threshold=0.35)
     face_gender_detector = FaceGenderDetector()
-    pose_classifier = PoseClassifier(hw_ratio_threshold=config["thresholds"].get("recline_hw_ratio", 1.25))
+    pose_classifier = PoseClassifier(
+        hw_ratio_threshold=config["thresholds"].get("recline_hw_ratio", 1.6),
+        angle_upright=config["thresholds"].get("recline_angle_upright", 60),
+        angle_reclining=config["thresholds"].get("recline_angle_reclining", 40),
+    )
     tracker = CentroidTracker(max_disappeared=30)
     rule_engine = RuleEngine(config)
     visualizer = Visualizer()

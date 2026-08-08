@@ -7,6 +7,7 @@ __pycache__/
 *.pt
 *.onnx
 *.engine
+*.task
 
 # Video media and snapshots
 *.mp4

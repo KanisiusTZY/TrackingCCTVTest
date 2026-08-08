@@ -144,6 +144,8 @@ class CentroidTracker:
             if pose_info:
                 self.objects[object_id]["pose"] = pose_info.get("pose", self.objects[object_id]["pose"])
                 self.objects[object_id]["pose_score"] = pose_info.get("score", 0.0)
+                self.objects[object_id]["pose_method"] = pose_info.get("method", "unknown")
+                self.objects[object_id]["pose_angle"] = pose_info.get("angle", -1.0)
 
             used_rows.add(row)
             used_cols.add(col)
