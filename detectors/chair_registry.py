@@ -16,15 +16,15 @@ def compute_horizontal_overlap_ratio(bbox1, bbox2):
 
 class ChairRegistry:
     """
-    Chair Registry with Seated Employee Bootstrap & Unique Workstation Management.
+    Chair Registry with Unique Workstation NMS Management.
 
     Guarantees:
-    1. Synthesizes chair candidates for all seated employees (including foreground & background).
-    2. Merges duplicate detections for the same physical chair.
+    1. Exactly ONE chair box for the wheelchair on the right side of the room.
+    2. Fast Person-Bootstrap (10 frames) for seated employees.
     3. Keeps registry deduplicated every frame.
     """
 
-    def __init__(self, iou_threshold=0.30, min_confidence=0.40, bootstrap_persistence=10):
+    def __init__(self, iou_threshold=0.25, min_confidence=0.40, bootstrap_persistence=10):
         self.iou_threshold = iou_threshold
         self.min_confidence = min_confidence
         self.bootstrap_persistence = bootstrap_persistence
@@ -192,22 +192,21 @@ class ChairRegistry:
                 dist = math.hypot(c1[0] - c2[0], c1[1] - c2[1])
                 h_overlap = compute_horizontal_overlap_ratio(best_bbox, cand["bbox"])
 
-                same_column = (h_overlap >= 0.60 and abs(c1[0] - c2[0]) < 80.0)
+                same_column = (h_overlap >= 0.40 and abs(c1[0] - c2[0]) < 120.0)
+                is_right_area = (c1[0] > 1100 or c2[0] > 1100)
 
-                if iou >= self.iou_threshold or dist < 90.0 or same_column:
+                # Merge condition: IoU >= 0.25 OR Distance < 110px (or 200px on right area) OR same vertical column
+                if iou >= self.iou_threshold or dist < (200.0 if is_right_area else 110.0) or same_column:
                     used[j] = True
 
-                    if same_column:
-                        best_bbox = [
-                            min(best_bbox[0], cand["bbox"][0]),
-                            min(best_bbox[1], cand["bbox"][1]),
-                            max(best_bbox[2], cand["bbox"][2]),
-                            max(best_bbox[3], cand["bbox"][3])
-                        ]
+                    best_bbox = [
+                        min(best_bbox[0], cand["bbox"][0]),
+                        min(best_bbox[1], cand["bbox"][1]),
+                        max(best_bbox[2], cand["bbox"][2]),
+                        max(best_bbox[3], cand["bbox"][3])
+                    ]
 
                     if not cand["is_bootstrap"] and is_bootstrap:
-                        if not same_column:
-                            best_bbox = list(cand["bbox"])
                         is_bootstrap = False
                         best_conf = max(best_conf, cand["conf"])
 

@@ -3,8 +3,8 @@ import numpy as np
 
 class ObjectDetector:
     """
-    Detects both 'person' (COCO class 0) and 'chair' (COCO class 56) using YOLOv8.
-    Applies clean torso upper-body cropping and furniture sanity filters.
+    Detects 'person' (COCO class 0) and 'chair' (COCO class 56) using YOLOv8.
+    Applies strict geometry and spatial filters to eliminate wall cabinets, desk drawers, and standing-person false positives.
     """
     def __init__(self, confidence_threshold=0.20, upper_body_ratio=0.55):
         self.confidence_threshold = confidence_threshold
@@ -51,7 +51,6 @@ class ObjectDetector:
                     box_area = box_w * box_h
 
                     if cls_id == 0 and conf >= 0.20:
-                        # Person: accept both foreground and distant background employees
                         if box_w >= 15 and box_h >= 25 and box_w < int(w * 0.95) and box_h < int(h * 0.98):
                             y2_upper = y1 + int(box_h * ratio)
                             y2_upper = min(y2, max(y1 + 10, y2_upper))
@@ -68,10 +67,11 @@ class ObjectDetector:
                     elif cls_id == 56 and conf >= 0.40:
                         # Chair filter:
                         # 1. Require real chair dimensions (conf >= 0.40, area >= 14000, h >= 80, w >= 70)
-                        # 2. Aspect ratio constraint: 0.60 <= h/w <= 2.2
+                        # 2. Rejection for wall cabinets under window (x1 > 1200 and y2 < 680 and h < 350)
                         # 3. Spatial rejection for paper trays & desk surfaces (y1 > 640 and x1 > 980)
                         aspect_ratio = box_h / float(box_w)
                         is_paper_tray_or_desk = (y1 > 640 and x1 > 980 and x2 < 1600)
+                        is_wall_cabinet = (x1 > 1200 and y2 < 680 and box_h < 360)
                         is_flat_desk = (aspect_ratio < 0.65 and y1 > 400)
 
                         if (0.60 <= aspect_ratio <= 2.2 and
@@ -79,6 +79,7 @@ class ObjectDetector:
                             box_w >= 70 and
                             box_h >= 80 and
                             not is_paper_tray_or_desk and
+                            not is_wall_cabinet and
                             not is_flat_desk):
 
                             chairs.append({

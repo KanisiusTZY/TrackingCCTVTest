@@ -26,14 +26,12 @@ def format_duration(seconds):
 
 class RuleChairStatus(BaseRule):
     """
-    Evaluates status per UNIQUE chair.
+    Evaluates status per UNIQUE chair with Standing/Moving Person Workstation Suppression.
 
     Guarantees:
     - EXACTLY ONE status per chair_id per frame.
     - Green upper-body box 'BEKERJA' is shown ONLY when an employee is physically seated at/over their chair!
-    - When an employee leaves their chair (e.g. walks to cabinet), the green box VANISHES from their body,
-      and the empty chair turns RED with 'TIDAK DI TEMPAT: XmYYs'.
-    - Suppresses stray empty red boxes on chair backrests/monitors near active seated employees.
+    - Suppresses false-positive chair candidates on standing employees (e.g. man at cabinet) or near active employees.
     """
     def __init__(self, enabled=True):
         super().__init__(name="Dynamic Chair Status (BEKERJA / TIDAK DI TEMPAT)", rule_id="rule_chair_status", enabled=enabled)
@@ -115,7 +113,7 @@ class RuleChairStatus(BaseRule):
             chair["away_timer"] = self.away_timers[chair_id]
             chair["away_label"] = f"TIDAK DI TEMPAT: {format_duration(self.away_timers[chair_id])}"
 
-            # Crucial: Only attach upper body box if status is BEKERJA AND person is physically near chair (< 130px)
+            # Only attach upper body box if status is BEKERJA AND person is physically near chair (< 130px)
             if new_status == "BEKERJA" and best_person is not None:
                 p_c = compute_centroid(best_person["bbox"])
                 c_c = compute_centroid(chair_bbox)
@@ -131,20 +129,22 @@ class RuleChairStatus(BaseRule):
                 chair["matched_person_id"] = None
                 chair["matched_upper_body_bbox"] = None
 
-        # Step 2: Workstation Proximity Suppression Pass for Seated Employees
+        # Step 2: Total Workstation & Standing-Person Suppression Pass
+        # Suppress any empty chair candidate located near ANY detected person (seated or standing)
         for chair_id, chair in clean_chairs.items():
             if chair["status"] == "TIDAK DI TEMPAT":
                 for person_id, person in tracked_persons.items():
-                    if person_id in assigned_person_ids:
-                        p_bbox = person["bbox"]
-                        iou = compute_iou(chair["bbox"], p_bbox)
-                        p_c = compute_centroid(p_bbox)
-                        c_c = compute_centroid(chair["bbox"])
-                        dist = math.hypot(p_c[0] - c_c[0], p_c[1] - c_c[1])
+                    p_bbox = person["bbox"]
+                    iou = compute_iou(chair["bbox"], p_bbox)
+                    p_c = compute_centroid(p_bbox)
+                    c_c = compute_centroid(chair["bbox"])
+                    dist = math.hypot(p_c[0] - c_c[0], p_c[1] - c_c[1])
+                    x_overlap = compute_x_overlap_ratio(chair["bbox"], p_bbox)
 
-                        if iou >= 0.08 or dist < 200.0:
-                            chair["suppressed"] = True
-                            break
+                    # Suppress false-positive empty chairs on or near standing persons (dist < 260px or x_overlap >= 30%)
+                    if iou >= 0.05 or dist < 260.0 or x_overlap >= 0.30:
+                        chair["suppressed"] = True
+                        break
 
         stale_cids = [cid for cid in self.prev_status if cid not in clean_chairs]
         for cid in stale_cids:
