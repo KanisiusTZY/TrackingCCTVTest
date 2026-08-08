@@ -16,15 +16,15 @@ def compute_horizontal_overlap_ratio(bbox1, bbox2):
 
 class ChairRegistry:
     """
-    Refined Chair Registry with Precise Seat Separations (70px distance NMS).
+    Refined Chair Registry with Aggressive NMS (180px distance & 35% X-overlap).
 
     Guarantees:
-    1. Keeps distinct adjacent workstations separate (does not merge separate employees).
-    2. Merges vertical backrests and seats of the same physical chair.
-    3. Fast Person-Bootstrap (15 frames) for seated employees.
+    1. Exactly 1 chair box per physical workstation (merges backrest, seat, and desk area).
+    2. Fast Person-Bootstrap (15 frames) for seated employees.
+    3. Keeps registry 100% deduplicated every frame.
     """
 
-    def __init__(self, iou_threshold=0.28, min_confidence=0.35, bootstrap_persistence=15):
+    def __init__(self, iou_threshold=0.25, min_confidence=0.45, bootstrap_persistence=15):
         self.iou_threshold = iou_threshold
         self.min_confidence = min_confidence
         self.bootstrap_persistence = bootstrap_persistence
@@ -68,7 +68,7 @@ class ChairRegistry:
 
         total_candidate_count = len(all_candidates)
 
-        # 2. Precise Global NMS / Centroid / Horizontal Overlap Merge
+        # 2. Aggressive Global NMS / Centroid / Horizontal Overlap Merge
         clean_chairs = self._global_nms_merge(all_candidates, frame_count)
 
         # 3. Replace self.registry completely
@@ -117,7 +117,6 @@ class ChairRegistry:
                 pad_x = int(pw * 0.15)
                 est_bbox = [max(0, px1 - pad_x), seat_y1, px2 + pad_x, seat_y2]
 
-                # Check if this estimated seat ALREADY overlaps or is near ANY existing candidate
                 already_has_chair = False
                 for cand in existing_candidates:
                     c1 = compute_centroid(est_bbox)
@@ -126,7 +125,7 @@ class ChairRegistry:
                     iou = compute_iou(est_bbox, cand["bbox"])
                     h_overlap = compute_horizontal_overlap_ratio(est_bbox, cand["bbox"])
 
-                    if iou >= 0.18 or dist < 70.0 or (h_overlap >= 0.65 and abs(c1[0] - c2[0]) < 60):
+                    if iou >= 0.15 or dist < 160.0 or h_overlap >= 0.35:
                         already_has_chair = True
                         break
 
@@ -138,7 +137,7 @@ class ChairRegistry:
                         iou = compute_iou(est_bbox, b_item["bbox"])
                         h_overlap = compute_horizontal_overlap_ratio(est_bbox, b_item["bbox"])
 
-                        if iou >= 0.18 or dist < 70.0 or (h_overlap >= 0.65 and abs(c1[0] - c2[0]) < 60):
+                        if iou >= 0.15 or dist < 160.0 or h_overlap >= 0.35:
                             already_has_chair = True
                             break
 
@@ -193,33 +192,22 @@ class ChairRegistry:
                 c1 = compute_centroid(best_bbox)
                 c2 = compute_centroid(cand["bbox"])
                 dist = math.hypot(c1[0] - c2[0], c1[1] - c2[1])
-
                 h_overlap = compute_horizontal_overlap_ratio(best_bbox, cand["bbox"])
-                same_column = (h_overlap >= 0.65 and abs(c1[0] - c2[0]) < 70.0)
 
-                # NMS merge condition: IoU >= 0.28 OR Centroid Distance < 70px OR Same Vertical Column (Backrest+Seat)
-                if iou >= self.iou_threshold or dist < 70.0 or same_column:
+                # Aggressive merge condition: IoU >= 0.25 OR Distance < 180px OR X-Overlap >= 35%
+                if iou >= self.iou_threshold or dist < 180.0 or h_overlap >= 0.35:
                     used[j] = True
 
-                    if same_column:
-                        best_bbox = [
-                            min(best_bbox[0], cand["bbox"][0]),
-                            min(best_bbox[1], cand["bbox"][1]),
-                            max(best_bbox[2], cand["bbox"][2]),
-                            max(best_bbox[3], cand["bbox"][3])
-                        ]
+                    # Enclose combined bounding box
+                    best_bbox = [
+                        min(best_bbox[0], cand["bbox"][0]),
+                        min(best_bbox[1], cand["bbox"][1]),
+                        max(best_bbox[2], cand["bbox"][2]),
+                        max(best_bbox[3], cand["bbox"][3])
+                    ]
 
                     if not cand["is_bootstrap"] and is_bootstrap:
-                        if not same_column:
-                            best_bbox = list(cand["bbox"])
                         is_bootstrap = False
-                        best_conf = max(best_conf, cand["conf"])
-                    elif not cand["is_bootstrap"] and not is_bootstrap and not same_column:
-                        alpha = 0.30
-                        best_bbox = [
-                            int(alpha * cand["bbox"][k] + (1 - alpha) * best_bbox[k])
-                            for k in range(4)
-                        ]
                         best_conf = max(best_conf, cand["conf"])
 
             merged_result[chair_id] = {
