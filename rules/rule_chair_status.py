@@ -16,23 +16,24 @@ def format_duration(seconds):
 
 class RuleChairStatus(BaseRule):
     """
-    Evaluates occupancy & away timer PER ENTRY IN ChairRegistry (permanent chairs).
+    TOTAL REWRITE: Evaluates status per UNIQUE chair from clean_chairs (ChairRegistry output).
 
-    Uses saved chair_bbox from ChairRegistry as ground truth position.
-    Matches against upper_body_bbox of tracked persons via IoU.
-    Never loses status evaluation due to chair body occlusion.
+    Guarantees:
+    - EXACTLY ONE status per chair_id per frame ("BEKERJA" or "TIDAK DI TEMPAT").
+    - "BEKERJA": Green box around person upper_body_bbox.
+    - "TIDAK DI TEMPAT": Red box around clean chair bbox + duration timer.
     """
     def __init__(self, enabled=True):
-        super().__init__(name="Chair Registry Status (BEKERJA / TIDAK DI TEMPAT)", rule_id="rule_chair_status", enabled=enabled)
+        super().__init__(name="Dynamic Chair Status (BEKERJA / TIDAK DI TEMPAT)", rule_id="rule_chair_status", enabled=enabled)
         self.occupied_counters = {}  # chair_id -> int
         self.empty_counters = {}     # chair_id -> int
-        self.away_timers = {}        # chair_id -> float (seconds)
-        self.prev_status = {}        # chair_id -> str ("BEKERJA" / "TIDAK DI TEMPAT")
+        self.away_timers = {}        # chair_id -> float
+        self.prev_status = {}        # chair_id -> str
 
-    def process(self, tracked_persons, registered_chairs, config, dt):
+    def process(self, tracked_persons, clean_chairs, config, dt):
         """
         tracked_persons: dict {p_id: person_data}
-        registered_chairs: dict {c_id: chair_registry_data}
+        clean_chairs: dict {c_id: chair_data} from ChairRegistry
         """
         if not self.enabled:
             return
@@ -40,7 +41,7 @@ class RuleChairStatus(BaseRule):
         iou_thresh = config["thresholds"].get("iou_chair_occupied", 0.15)
         persistence = config["thresholds"].get("persistence_frames", 15)
 
-        for chair_id, chair in registered_chairs.items():
+        for chair_id, chair in clean_chairs.items():
             chair_bbox = chair["bbox"]
 
             if chair_id not in self.occupied_counters:
@@ -49,7 +50,7 @@ class RuleChairStatus(BaseRule):
                 self.away_timers[chair_id] = 0.0
                 self.prev_status[chair_id] = "TIDAK DI TEMPAT"
 
-            # Find upper_body_bbox of person with highest IoU against registered chair_bbox
+            # Find upper_body_bbox of person with highest IoU against chair_bbox
             max_iou = 0.0
             best_person = None
 
@@ -60,7 +61,7 @@ class RuleChairStatus(BaseRule):
                     max_iou = iou
                     best_person = person
 
-            # Counter update logic
+            # IoU Threshold evaluation
             if max_iou >= iou_thresh:
                 self.occupied_counters[chair_id] += 1
                 self.empty_counters[chair_id] = 0
@@ -68,7 +69,7 @@ class RuleChairStatus(BaseRule):
                 self.empty_counters[chair_id] += 1
                 self.occupied_counters[chair_id] = 0
 
-            # Persistence gating + hysteresis evaluation
+            # Persistence Gating & Hysteresis
             if self.occupied_counters[chair_id] >= persistence:
                 new_status = "BEKERJA"
                 self.away_timers[chair_id] = 0.0
@@ -76,21 +77,22 @@ class RuleChairStatus(BaseRule):
                 new_status = "TIDAK DI TEMPAT"
                 self.away_timers[chair_id] += dt
             else:
+                # Keep previous status (hysteresis)
                 new_status = self.prev_status[chair_id]
                 if new_status == "TIDAK DI TEMPAT":
                     self.away_timers[chair_id] += dt
 
-            # Log status change to console
+            # Transition Logging
             if new_status != self.prev_status[chair_id]:
                 if new_status == "TIDAK DI TEMPAT":
-                    print(f"[CHAIR REGISTRY #{chair_id}] status changed: BEKERJA -> TIDAK DI TEMPAT (timer started)")
+                    print(f"[CHAIR #{chair_id}] status changed: BEKERJA -> TIDAK DI TEMPAT (away timer started)")
                 else:
-                    away_dur = format_duration(self.away_timers.get(chair_id, 0.0))
-                    print(f"[CHAIR REGISTRY #{chair_id}] status changed: TIDAK DI TEMPAT -> BEKERJA (was away for {away_dur})")
+                    dur = format_duration(self.away_timers.get(chair_id, 0.0))
+                    print(f"[CHAIR #{chair_id}] status changed: TIDAK DI TEMPAT -> BEKERJA (was away for {dur})")
 
             self.prev_status[chair_id] = new_status
 
-            # Attach status properties to registered chair object for rendering
+            # Attach properties to chair object for visualizer rendering
             chair["status"] = new_status
             chair["away_timer"] = self.away_timers[chair_id]
             chair["away_label"] = f"TIDAK DI TEMPAT: {format_duration(self.away_timers[chair_id])}"
@@ -101,3 +103,11 @@ class RuleChairStatus(BaseRule):
             else:
                 chair["matched_person_id"] = None
                 chair["matched_upper_body_bbox"] = None
+
+        # Clean up stale chair entries from tracking counters
+        stale_cids = [cid for cid in self.prev_status if cid not in clean_chairs]
+        for cid in stale_cids:
+            del self.occupied_counters[cid]
+            del self.empty_counters[cid]
+            del self.away_timers[cid]
+            del self.prev_status[cid]
