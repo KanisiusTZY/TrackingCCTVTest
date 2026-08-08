@@ -4,11 +4,11 @@ import numpy as np
 class ObjectDetector:
     """
     Detects both 'person' (COCO class 0) and 'chair' (COCO class 56) using YOLOv8.
-    Applies class-specific confidence, dimension, and aspect-ratio filters:
-    - Person: conf >= 0.35, accommodates foreground & background employees.
-    - Chair: conf >= 0.35, min area >= 15,000 px^2, filters out paper trays & desks.
+    Applies class-specific confidence, dimension, and furniture sanity filters:
+    - Person: conf >= 0.22 (detects both foreground and distant background employees).
+    - Chair: conf >= 0.35, aspect ratio 0.65..2.2, filters out desk drawers, paper trays, and floor cabinets.
     """
-    def __init__(self, confidence_threshold=0.30, upper_body_ratio=0.55):
+    def __init__(self, confidence_threshold=0.22, upper_body_ratio=0.55):
         self.confidence_threshold = confidence_threshold
         self.upper_body_ratio = upper_body_ratio
         self.model = None
@@ -35,7 +35,7 @@ class ObjectDetector:
             return {"persons": persons, "chairs": chairs}
 
         try:
-            results = self.model(frame, verbose=False, classes=[0, 56], conf=0.20)
+            results = self.model(frame, verbose=False, classes=[0, 56], conf=0.18)
             for r in results:
                 boxes = r.boxes
                 for box in boxes:
@@ -52,9 +52,9 @@ class ObjectDetector:
                     box_h = y2 - y1
                     box_area = box_w * box_h
 
-                    if cls_id == 0 and conf >= 0.30:
-                        # Person: accept both foreground and background persons
-                        if box_w >= 20 and box_h >= 30 and box_w < int(w * 0.90) and box_h < int(h * 0.95):
+                    if cls_id == 0 and conf >= 0.22:
+                        # Person: accept both foreground and distant background persons
+                        if box_w >= 15 and box_h >= 25 and box_w < int(w * 0.90) and box_h < int(h * 0.95):
                             y2_upper = y1 + int(box_h * ratio)
                             y2_upper = min(y2, max(y1 + 10, y2_upper))
 
@@ -64,9 +64,13 @@ class ObjectDetector:
                                 "confidence": conf
                             })
                     elif cls_id == 56 and conf >= 0.35:
-                        # Chair: filter invalid aspect ratios and small garbage objects (paper trays, monitor stands)
+                        # Chair filter:
+                        # 1. Aspect ratio: 0.65 <= h/w <= 2.2 (eliminates flat desk drawers)
+                        # 2. Rejection for floor-level paper trays / drawers under desk (y1 > 720 and x1 > 1000)
                         aspect_ratio = box_h / float(box_w)
-                        if 0.5 <= aspect_ratio <= 2.2 and box_area >= 14000 and box_w >= 70 and box_h >= 80:
+                        is_desk_drawer = (y1 > 700 and x1 > 1050 and x2 < 1550)
+
+                        if 0.65 <= aspect_ratio <= 2.2 and box_area >= 14000 and box_w >= 70 and box_h >= 90 and not is_desk_drawer:
                             chairs.append({
                                 "bbox": [x1, y1, x2, y2],
                                 "confidence": conf

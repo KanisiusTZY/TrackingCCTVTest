@@ -3,10 +3,6 @@ import numpy as np
 from tracker import compute_iou, compute_centroid
 
 def compute_horizontal_overlap_ratio(bbox1, bbox2):
-    """
-    Computes horizontal (X-axis) overlap ratio relative to the narrower box width.
-    Helps merge chair backrests and chair seats belonging to the same physical chair.
-    """
     x1 = max(bbox1[0], bbox2[0])
     x2 = min(bbox1[2], bbox2[2])
     inter_x = max(0, x2 - x1)
@@ -20,15 +16,15 @@ def compute_horizontal_overlap_ratio(bbox1, bbox2):
 
 class ChairRegistry:
     """
-    Refined Chair Registry with Fast Person-Bootstrap (15 frames) & Aggressive Deduplication.
+    Refined Chair Registry with Precise Seat Separations (70px distance NMS).
 
     Guarantees:
-    1. Zero duplicate chair boxes.
-    2. Fast bootstrap for seated employees (15 frames with typing movement tolerance).
-    3. Per-frame Global NMS keeps the registry 100% clean every frame.
+    1. Keeps distinct adjacent workstations separate (does not merge separate employees).
+    2. Merges vertical backrests and seats of the same physical chair.
+    3. Fast Person-Bootstrap (15 frames) for seated employees.
     """
 
-    def __init__(self, iou_threshold=0.20, min_confidence=0.35, bootstrap_persistence=15):
+    def __init__(self, iou_threshold=0.28, min_confidence=0.35, bootstrap_persistence=15):
         self.iou_threshold = iou_threshold
         self.min_confidence = min_confidence
         self.bootstrap_persistence = bootstrap_persistence
@@ -72,7 +68,7 @@ class ChairRegistry:
 
         total_candidate_count = len(all_candidates)
 
-        # 2. Aggressive Global NMS / Centroid / Horizontal Overlap Merge
+        # 2. Precise Global NMS / Centroid / Horizontal Overlap Merge
         clean_chairs = self._global_nms_merge(all_candidates, frame_count)
 
         # 3. Replace self.registry completely
@@ -83,10 +79,6 @@ class ChairRegistry:
         return self.registry
 
     def _generate_bootstrap_candidates(self, tracked_persons, existing_candidates):
-        """
-        Identifies seated persons (shift < 45px for >= 15 frames)
-        and creates estimated seat candidate if no chair already overlaps.
-        """
         bootstrap_list = []
         active_pids = set(tracked_persons.keys())
 
@@ -104,7 +96,7 @@ class ChairRegistry:
                 prev_c = self.person_stability[pid]["centroid"]
                 dist = math.hypot(centroid[0] - prev_c[0], centroid[1] - prev_c[1])
 
-                if dist < 45.0:  # Allow natural head & arm typing movement
+                if dist < 45.0:  # Natural head & arm typing movement
                     self.person_stability[pid]["frames"] += 1
                     self.person_stability[pid]["last_bbox"] = full_bbox
                 else:
@@ -134,7 +126,7 @@ class ChairRegistry:
                     iou = compute_iou(est_bbox, cand["bbox"])
                     h_overlap = compute_horizontal_overlap_ratio(est_bbox, cand["bbox"])
 
-                    if iou >= 0.15 or dist < 120.0 or (h_overlap >= 0.60 and abs(c1[0] - c2[0]) < 80):
+                    if iou >= 0.18 or dist < 70.0 or (h_overlap >= 0.65 and abs(c1[0] - c2[0]) < 60):
                         already_has_chair = True
                         break
 
@@ -146,7 +138,7 @@ class ChairRegistry:
                         iou = compute_iou(est_bbox, b_item["bbox"])
                         h_overlap = compute_horizontal_overlap_ratio(est_bbox, b_item["bbox"])
 
-                        if iou >= 0.15 or dist < 120.0 or (h_overlap >= 0.60 and abs(c1[0] - c2[0]) < 80):
+                        if iou >= 0.18 or dist < 70.0 or (h_overlap >= 0.65 and abs(c1[0] - c2[0]) < 60):
                             already_has_chair = True
                             break
 
@@ -203,9 +195,10 @@ class ChairRegistry:
                 dist = math.hypot(c1[0] - c2[0], c1[1] - c2[1])
 
                 h_overlap = compute_horizontal_overlap_ratio(best_bbox, cand["bbox"])
-                same_column = (h_overlap >= 0.60 and abs(c1[0] - c2[0]) < 90.0)
+                same_column = (h_overlap >= 0.65 and abs(c1[0] - c2[0]) < 70.0)
 
-                if iou >= self.iou_threshold or dist < 120.0 or same_column:
+                # NMS merge condition: IoU >= 0.28 OR Centroid Distance < 70px OR Same Vertical Column (Backrest+Seat)
+                if iou >= self.iou_threshold or dist < 70.0 or same_column:
                     used[j] = True
 
                     if same_column:
