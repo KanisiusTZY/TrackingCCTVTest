@@ -1,27 +1,7 @@
 {
-  "chair_zones": [
-    {
-      "id": "chair_1",
-      "name": "Desk Zone 1 (Left)",
-      "bbox": [380, 300, 780, 950]
-    },
-    {
-      "id": "chair_2",
-      "name": "Desk Zone 2 (Center)",
-      "bbox": [600, 300, 780, 520]
-    },
-    {
-      "id": "chair_3",
-      "name": "Desk Zone 3 (Right)",
-      "bbox": [1050, 250, 1480, 700]
-    }
-  ],
   "thresholds": {
-    "iou_chair_occupied": 0.20,
-    "persistence_frames": 15
-  },
-  "rules_enabled": {
-    "rule_seat_status": true,
-    "rule4_opposite_gender": false
+    "iou_chair_occupied": 0.15,
+    "persistence_frames": 15,
+    "person_upper_body_ratio": 0.55
   }
 }

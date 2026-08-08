@@ -4,8 +4,8 @@ import time
 import os
 import argparse
 
-from tracker import CentroidTracker
-from detectors.person_detector import PersonDetector
+from tracker import MultiCategoryTracker
+from detectors.person_detector import ObjectDetector
 from rules.rule_engine import RuleEngine
 from visualizer import Visualizer
 
@@ -13,18 +13,10 @@ def load_config(config_path="config.json"):
     if not os.path.exists(config_path):
         print(f"[WARNING] Config file {config_path} not found. Creating default configuration.")
         default_config = {
-            "chair_zones": [
-                {"id": "chair_1", "name": "Desk Zone 1 (Left)", "bbox": [380, 300, 780, 950]},
-                {"id": "chair_2", "name": "Desk Zone 2 (Center)", "bbox": [600, 300, 780, 520]},
-                {"id": "chair_3", "name": "Desk Zone 3 (Right)", "bbox": [1050, 250, 1480, 700]}
-            ],
             "thresholds": {
-                "iou_chair_occupied": 0.20,
-                "persistence_frames": 15
-            },
-            "rules_enabled": {
-                "rule_seat_status": True,
-                "rule4_opposite_gender": False
+                "iou_chair_occupied": 0.15,
+                "persistence_frames": 15,
+                "person_upper_body_ratio": 0.55
             }
         }
         with open(config_path, "w") as f:
@@ -37,7 +29,7 @@ def load_config(config_path="config.json"):
 def main():
     default_src = "p.mp4" if os.path.exists("p.mp4") else "videoplayback.mp4"
 
-    parser = argparse.ArgumentParser(description="Skynet Office CCTV Seat Monitoring System")
+    parser = argparse.ArgumentParser(description="Skynet CCTV Dynamic Chair & Upper-Body Monitoring System")
     parser.add_argument("--source", type=str, default=default_src, help=f"Video source file or camera index (default: {default_src})")
     parser.add_argument("--config", type=str, default="config.json", help="Path to config file (default: config.json)")
     parser.add_argument("--output", type=str, default="output_skynet_monitoring.mp4", help="Path to save output video (default: output_skynet_monitoring.mp4)")
@@ -48,12 +40,13 @@ def main():
 
     # Load configuration
     config = load_config(args.config)
-    chair_zones = config.get("chair_zones", [])
+    thresholds = config.get("thresholds", {})
+    upper_body_ratio = thresholds.get("person_upper_body_ratio", 0.55)
 
     # Initialize detection & tracking components
-    print("[INFO] Initializing Seat Monitoring System...")
-    person_detector = PersonDetector(confidence_threshold=0.35)
-    tracker = CentroidTracker(max_disappeared=30)
+    print("[INFO] Initializing Dynamic Chair & Upper-Body Monitoring System...")
+    detector = ObjectDetector(confidence_threshold=0.20, upper_body_ratio=upper_body_ratio)
+    tracker = MultiCategoryTracker(person_max_disappeared=30, chair_max_disappeared=10)
     rule_engine = RuleEngine(config)
     visualizer = Visualizer()
 
@@ -78,7 +71,7 @@ def main():
         video_writer = cv2.VideoWriter(args.output, fourcc, video_fps, (frame_w, frame_h))
         print(f"[INFO] Recording output video to '{args.output}' ({frame_w}x{frame_h} @ {video_fps:.1f} FPS)...")
 
-    window_name = "Seat Monitoring System"
+    window_name = "Dynamic Chair & Upper-Body Monitoring System"
     if not args.headless:
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
 
@@ -92,7 +85,6 @@ def main():
     while True:
         ret, frame = cap.read()
         if not ret:
-            # Loop video if source is a file and not recording, or stop if finished recording
             if isinstance(video_source, str) and os.path.exists(video_source) and args.max_frames == 0 and not args.output:
                 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                 continue
@@ -105,17 +97,17 @@ def main():
         fps = 1.0 / dt if dt > 0 else 0.0
         frame_count += 1
 
-        # Step 1: Detect persons
-        person_bboxes = person_detector.detect(frame)
+        # Step 1: Detect persons and chairs
+        detections = detector.detect(frame, upper_body_ratio=upper_body_ratio)
 
-        # Step 2: Update multi-object tracker
-        tracked_persons = tracker.update(person_bboxes)
+        # Step 2: Update multi-category tracker (persons + chairs with last-known bbox persistence)
+        tracked_objects = tracker.update(detections["persons"], detections["chairs"])
 
-        # Step 3: Process seat status rule (IoU overlap check)
-        rule_engine.process_all(tracked_persons, chair_zones, dt)
+        # Step 3: Process dynamic chair status rule
+        rule_engine.process_all(tracked_objects, dt)
 
         # Step 4: Render Visual HUD Overlay
-        output_frame = visualizer.render(frame, tracked_persons, chair_zones, rule_engine, fps=fps)
+        output_frame = visualizer.render(frame, tracked_objects, rule_engine, fps=fps)
 
         # Write frame to MP4 output video file
         if video_writer is not None:

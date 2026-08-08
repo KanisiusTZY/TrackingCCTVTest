@@ -1,4 +1,4 @@
-from rules.rule_seat_status import RuleSeatStatus
+from rules.rule_chair_status import RuleChairStatus
 
 class RuleEngine:
     def __init__(self, config):
@@ -6,17 +6,18 @@ class RuleEngine:
         rules_cfg = config.get("rules_enabled", {})
 
         self.rules = {
-            "rule_seat_status": RuleSeatStatus(enabled=rules_cfg.get("rule_seat_status", True)),
+            "rule_chair_status": RuleChairStatus(enabled=rules_cfg.get("rule_chair_status", True)),
         }
 
-    def process_all(self, tracked_persons, chair_zones, dt):
+    def process_all(self, tracked_objects, dt):
         """
-        Runs the active seat status rule.
+        Runs the dynamic chair status rule on tracked persons and detected chairs.
+        tracked_objects: dict {"persons": {...}, "chairs": {...}}
         """
         for rule in self.rules.values():
-            rule.process(tracked_persons, chair_zones, self.config, dt)
+            rule.process(tracked_objects, self.config, dt)
 
-    def toggle_rule(self, rule_id="rule_seat_status"):
+    def toggle_rule(self, rule_id="rule_chair_status"):
         if rule_id in self.rules:
             new_state = self.rules[rule_id].toggle()
             self.config["rules_enabled"][rule_id] = new_state
@@ -24,7 +25,7 @@ class RuleEngine:
             return new_state
         return False
 
-    def is_rule_enabled(self, rule_id="rule_seat_status"):
+    def is_rule_enabled(self, rule_id="rule_chair_status"):
         if rule_id in self.rules:
             return self.rules[rule_id].enabled
         return False
