@@ -43,11 +43,12 @@ def main():
     config = load_config(args.config)
     thresholds = config.get("thresholds", {})
     upper_body_ratio = thresholds.get("person_upper_body_ratio", 0.55)
+    persistence = thresholds.get("persistence_frames", 15)
 
     # Initialize detection, registry & tracking components
     print("[INFO] Initializing Chair Registry & Upper-Body Monitoring System...")
     detector = ObjectDetector(confidence_threshold=0.20, upper_body_ratio=upper_body_ratio)
-    chair_registry = ChairRegistry(min_confidence=0.45, match_iou_threshold=0.35)
+    chair_registry = ChairRegistry(min_confidence=0.45, match_iou_threshold=0.35, bootstrap_persistence=persistence * 2)
     person_tracker = PersonTracker(max_disappeared=30)
     rule_engine = RuleEngine(config)
     visualizer = Visualizer()
@@ -102,11 +103,11 @@ def main():
         # Step 1: Detect persons and chairs
         detections = detector.detect(frame, upper_body_ratio=upper_body_ratio)
 
-        # Step 2: Update persistent Chair Registry (live high-conf chair detections refine/add entries)
-        registered_chairs = chair_registry.update(detections["chairs"])
-
-        # Step 3: Update PersonTracker (tracked persons with full-body and upper-body bboxes)
+        # Step 2: Update PersonTracker (tracked persons with full-body and upper-body bboxes)
         tracked_persons = person_tracker.update(detections["persons"])
+
+        # Step 3: Update persistent Chair Registry (with person bootstrap fallback & deduplication)
+        registered_chairs = chair_registry.update(detections["chairs"], tracked_persons=tracked_persons)
 
         # Step 4: Process occupancy rule against Chair Registry
         rule_engine.process_all(tracked_persons, registered_chairs, dt)
