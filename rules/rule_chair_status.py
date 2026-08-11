@@ -26,13 +26,14 @@ def format_duration(seconds):
 
 class RuleChairStatus(BaseRule):
     """
-    Evaluates Workstation Status based on Head & Body Presence with Temporal Hysteresis.
+    Evaluates Workstation Status based on Head & Body Presence with Temporal Hysteresis & Assignment Persistence.
 
     Guarantees:
-    1. 100% Occlusion Resistance: Status is BEKERJA as long as employee's upper-body/head is at desk.
-    2. Zero Flicker: Hysteresis persistence buffer prevents 1-3 frame detection drops from flickering.
-    3. Displays RED box 'TIDAK DI TEMPAT: XmYYs' when employee leaves workstation.
-    4. 1-to-1 Person-Workstation Matching: Eliminates duplicate boxes.
+    1. Zero Passerby Interference: Walking people passing near a desk do NOT trigger BEKERJA.
+       - Requires 5 consecutive frames (~0.2s) of seated overlap before status becomes BEKERJA.
+       - Rejects moving persons (net_displacement >= 18px).
+    2. Zero Duplicate Workstations: Single 1-to-1 matching per workstation.
+    3. Zero Flicker: Hysteresis persistence buffer prevents 1-11 frame detection drops from flickering.
     """
     def __init__(self, enabled=True):
         super().__init__(name="Dynamic Workstation Status (BEKERJA / TIDAK DI TEMPAT)", rule_id="rule_chair_status", enabled=enabled)
@@ -40,6 +41,9 @@ class RuleChairStatus(BaseRule):
         self.empty_counters = {}
         self.away_timers = {}
         self.prev_status = {}
+        self.matched_persons = {}
+
+        self.OCCUPIED_PERSISTENCE = 5           # Require 5 consecutive frames of overlap before declaring BEKERJA
         self.EMPTY_HYSTERESIS_PERSISTENCE = 12  # Keep BEKERJA status for 12 frames (~0.4s) before declaring TIDAK DI TEMPAT
 
     def process(self, tracked_persons, clean_chairs, config, dt):
@@ -58,9 +62,13 @@ class RuleChairStatus(BaseRule):
                 self.empty_counters[chair_id] = 0
                 self.away_timers[chair_id] = 0.0
                 self.prev_status[chair_id] = "TIDAK DI TEMPAT"
+                self.matched_persons[chair_id] = None
 
             max_score = 0.0
             best_person = None
+
+            # Prioritize currently assigned seated person if available
+            curr_matched_id = self.matched_persons.get(chair_id)
 
             for person_id, person in tracked_persons.items():
                 if person_id in assigned_person_ids:
@@ -71,9 +79,14 @@ class RuleChairStatus(BaseRule):
                 pw = max(1, px2 - px1)
                 ph = max(1, py2 - py1)
                 aspect_ratio = ph / float(pw)
+                net_displacement = person.get("net_displacement", 0.0)
 
-                # Rejection for standing upright walking persons (H/W > 1.85)
-                if aspect_ratio > 1.85:
+                # Rejection 1: Standing upright walking persons (H/W > 1.80)
+                if aspect_ratio > 1.80:
+                    continue
+
+                # Rejection 2: Actively moving / walking persons (net_displacement >= 18px)
+                if net_displacement >= 18.0:
                     continue
 
                 upper_bbox = person.get("upper_body_bbox", person["bbox"])
@@ -85,9 +98,14 @@ class RuleChairStatus(BaseRule):
                 dist = math.hypot(p_c[0] - c_c[0], p_c[1] - c_c[1])
                 x_overlap = compute_x_overlap_ratio(chair_bbox, full_bbox)
 
-                # Head & Desk Presence Match: Matches even if facing away or occluded behind monitor
+                # Head & Desk Presence Match
                 if iou >= 0.02 or full_iou >= 0.02 or dist < 280.0 or x_overlap >= 0.15:
                     score = max(iou, full_iou, 0.50 if dist < 280.0 else 0.0)
+
+                    # Give bonus to currently matched person to prevent passerby hijacking
+                    if person_id == curr_matched_id:
+                        score += 0.30
+
                     if score > max_score:
                         max_score = score
                         best_person = person
@@ -101,16 +119,20 @@ class RuleChairStatus(BaseRule):
                 self.empty_counters[chair_id] += 1
                 self.occupied_counters[chair_id] = 0
 
-            # Hysteresis state transition logic
-            if self.occupied_counters[chair_id] >= 1:
+            # Assignment Persistence & Hysteresis State Transition Logic
+            if self.occupied_counters[chair_id] >= self.OCCUPIED_PERSISTENCE:
+                # Seated overlap maintained for >= 5 frames -> Declare BEKERJA
                 new_status = "BEKERJA"
                 self.away_timers[chair_id] = 0.0
-            elif self.empty_counters[chair_id] < self.EMPTY_HYSTERESIS_PERSISTENCE and self.prev_status[chair_id] == "BEKERJA":
-                # Maintain BEKERJA status during transient 1-11 frame detection drops (anti-flicker)
+                self.matched_persons[chair_id] = best_person["id"] if best_person else self.matched_persons.get(chair_id)
+            elif self.prev_status[chair_id] == "BEKERJA" and self.empty_counters[chair_id] < self.EMPTY_HYSTERESIS_PERSISTENCE:
+                # Maintain BEKERJA status during transient detection drops / passerby occlusion
                 new_status = "BEKERJA"
             else:
                 new_status = "TIDAK DI TEMPAT"
                 self.away_timers[chair_id] += dt
+                if self.empty_counters[chair_id] >= self.EMPTY_HYSTERESIS_PERSISTENCE:
+                    self.matched_persons[chair_id] = None
 
             # Transition Logging
             if new_status != self.prev_status[chair_id]:
@@ -140,3 +162,5 @@ class RuleChairStatus(BaseRule):
             del self.empty_counters[cid]
             del self.away_timers[cid]
             del self.prev_status[cid]
+            if cid in self.matched_persons:
+                del self.matched_persons[cid]

@@ -58,7 +58,7 @@ class ChairRegistry:
                     "priority": 1
                 })
 
-        # 2. Global Deduplication & NMS with Stable Workstation ID Matching
+        # 2. Global Deduplication & NMS with Bulletproof Workstation ID Matching
         clean_chairs = self._global_nms_merge(all_candidates, frame_count)
 
         # 3. Filter out transient unconfirmed bootstrap entries that were only occupied briefly
@@ -74,7 +74,6 @@ class ChairRegistry:
                 entry["confirmed_by_chair"] = True
                 final_registry[cid] = entry
             elif status == "BEKERJA" or is_bootstrap:
-                # Keep active seated workstations while person is present
                 final_registry[cid] = entry
 
         self.registry = final_registry
@@ -94,9 +93,9 @@ class ChairRegistry:
             if aspect_ratio > 1.80:
                 continue
 
-            # Rejection 2: Persons actively moving (net_displacement >= 20px)
+            # Rejection 2: Persons actively moving (net_displacement >= 18px)
             net_displacement = person.get("net_displacement", 999.0)
-            if net_displacement >= 20.0:
+            if net_displacement >= 18.0:
                 continue
 
             # Synthesize workstation seat box around person upper body & seat position
@@ -105,7 +104,7 @@ class ChairRegistry:
             pad_x = int(pw * 0.05)
             est_bbox = [max(0, px1 - pad_x), seat_y1, px2 + pad_x, seat_y2]
 
-            # Check if this person already maps to an existing workstation
+            # Check if this person already maps to an existing workstation candidate or registry entry
             already_has_workstation = False
             for cand in existing_candidates:
                 c1 = compute_centroid(est_bbox)
@@ -137,7 +136,7 @@ class ChairRegistry:
         if not candidates:
             return {}
 
-        # Sort by (priority, conf) descending
+        # Sort candidates by priority (presence=3 > registry=2 > yolo=1), then confidence descending
         candidates.sort(key=lambda c: (c["priority"], c["conf"]), reverse=True)
 
         merged_result = {}
@@ -150,39 +149,62 @@ class ChairRegistry:
             anchor = candidates[i]
             used[i] = True
 
+            anchor_c = compute_centroid(anchor["bbox"])
             chair_id = anchor["id"]
+
+            # Step A: Match candidate against existing registry entries OR already merged_result entries
             if chair_id is None:
-                anchor_c = compute_centroid(anchor["bbox"])
-                best_existing_id = None
+                best_match_id = None
                 min_d = 120.0
 
-                for reg_id, reg_entry in self.registry.items():
-                    reg_c = compute_centroid(reg_entry["bbox"])
-                    d = math.hypot(anchor_c[0] - reg_c[0], anchor_c[1] - reg_c[1])
-                    iou = compute_iou(anchor["bbox"], reg_entry["bbox"])
+                # 1. First check against ALREADY MERGED entries in current frame
+                for m_id, m_entry in merged_result.items():
+                    m_c = compute_centroid(m_entry["bbox"])
+                    d = math.hypot(anchor_c[0] - m_c[0], anchor_c[1] - m_c[1])
+                    iou = compute_iou(anchor["bbox"], m_entry["bbox"])
 
-                    if (d < min_d or iou >= 0.20) and reg_id not in merged_result:
+                    if iou >= 0.20 or d < min_d:
                         min_d = d
-                        best_existing_id = reg_id
+                        best_match_id = m_id
 
-                if best_existing_id is not None:
-                    chair_id = best_existing_id
+                # 2. Then check against self.registry if not matched yet
+                if best_match_id is None:
+                    for reg_id, reg_entry in self.registry.items():
+                        reg_c = compute_centroid(reg_entry["bbox"])
+                        d = math.hypot(anchor_c[0] - reg_c[0], anchor_c[1] - reg_c[1])
+                        iou = compute_iou(anchor["bbox"], reg_entry["bbox"])
+
+                        if iou >= 0.20 or d < min_d:
+                            min_d = d
+                            best_match_id = reg_id
+
+                if best_match_id is not None:
+                    chair_id = best_match_id
                 else:
                     chair_id = self.next_chair_id
                     self.next_chair_id += 1
 
+            # Step B: If chair_id is already in merged_result, merge candidate into that existing entry!
+            if chair_id in merged_result:
+                existing = merged_result[chair_id]
+                if anchor.get("confirmed_by_chair"):
+                    existing["confirmed_by_chair"] = True
+                existing["occupied_frames"] = max(existing.get("occupied_frames", 0), anchor.get("occupied_frames", 0))
+                if not anchor["is_bootstrap"]:
+                    existing["is_bootstrap"] = False
+                existing["last_seen_frame"] = frame_count
+                continue
+
+            # Step C: Create new entry in merged_result for chair_id
             best_bbox = list(anchor["bbox"])
             best_conf = anchor["conf"]
             is_bootstrap = anchor["is_bootstrap"]
             confirmed = anchor.get("confirmed_by_chair", False)
             occupied_frames = anchor.get("occupied_frames", 0)
             age = anchor["age"]
-            last_seen = anchor.get("last_seen_frame", frame_count)
+            last_seen = frame_count if anchor["source"] in ["yolo", "presence"] else anchor.get("last_seen_frame", frame_count)
 
-            if anchor["source"] in ["yolo", "presence"]:
-                last_seen = frame_count
-
-            # Merge any overlapping candidate boxes (IoU >= 0.20 or distance < 110px)
+            # Merge any remaining overlapping candidate boxes in the candidate list
             for j in range(i + 1, len(candidates)):
                 if used[j]:
                     continue
@@ -195,11 +217,9 @@ class ChairRegistry:
 
                 if iou >= 0.20 or dist < 110.0:
                     used[j] = True
-
                     if cand.get("confirmed_by_chair"):
                         confirmed = True
                     occupied_frames = max(occupied_frames, cand.get("occupied_frames", 0))
-
                     if not cand["is_bootstrap"]:
                         is_bootstrap = False
                         best_conf = max(best_conf, cand["conf"])
