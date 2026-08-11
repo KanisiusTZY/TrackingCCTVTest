@@ -38,8 +38,10 @@ class PersonTracker:
         self.next_id = 1
         self.objects = {}  # id -> dict of person state
         self.disappeared = {}  # id -> consecutive disappeared frames count
+        self.centroid_history = {}  # id -> list of recent centroids (max 20 frames)
         self.max_disappeared = max_disappeared
         self.min_distance_px = min_distance_px
+        self.HISTORY_LEN = 20  # Number of frames to track for net displacement
 
     def register(self, detection):
         bbox = detection["bbox"]
@@ -51,10 +53,12 @@ class PersonTracker:
             "upper_body_bbox": detection.get("upper_body_bbox", bbox),
             "centroid": centroid,
             "confidence": detection.get("confidence", 1.0),
+            "net_displacement": 0.0,  # Net distance from first observed position
         }
 
         self.objects[self.next_id] = obj_data
         self.disappeared[self.next_id] = 0
+        self.centroid_history[self.next_id] = [centroid]
         self.next_id += 1
 
     def deregister(self, object_id):
@@ -62,6 +66,8 @@ class PersonTracker:
             del self.objects[object_id]
         if object_id in self.disappeared:
             del self.disappeared[object_id]
+        if object_id in self.centroid_history:
+            del self.centroid_history[object_id]
 
     def update(self, person_detections):
         """
@@ -114,9 +120,26 @@ class PersonTracker:
             ]
 
             self.objects[object_id]["bbox"] = smoothed_bbox
-            self.objects[object_id]["centroid"] = compute_centroid(smoothed_bbox)
+            new_centroid = compute_centroid(smoothed_bbox)
+            self.objects[object_id]["centroid"] = new_centroid
             self.objects[object_id]["confidence"] = det.get("confidence", 1.0)
             self.disappeared[object_id] = 0
+
+            # Update centroid history for net displacement calculation
+            history = self.centroid_history.get(object_id, [])
+            history.append(new_centroid)
+            if len(history) > self.HISTORY_LEN:
+                history = history[-self.HISTORY_LEN:]
+            self.centroid_history[object_id] = history
+
+            # Net displacement = distance between oldest and newest centroid in history
+            if len(history) >= 2:
+                oldest = history[0]
+                newest = history[-1]
+                net_disp = math.hypot(newest[0] - oldest[0], newest[1] - oldest[1])
+            else:
+                net_disp = 0.0
+            self.objects[object_id]["net_displacement"] = net_disp
 
             ub = det.get("upper_body_bbox", bbox)
             old_ub = self.objects[object_id].get("upper_body_bbox", ub)

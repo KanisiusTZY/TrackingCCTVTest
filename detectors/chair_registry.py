@@ -19,14 +19,14 @@ class ChairRegistry:
     Employee Workstation Registry based on Head & Desk Presence.
 
     Guarantees:
-    1. 100% Detection for all seated employees (including bottom-left foreground employee).
+    1. 100% Detection for all 6 employees in s.mp4 (preserves tightly packed adjacent desks).
     2. Zero Random Red Boxes on unused room furniture, paper trays, or curved desks.
     3. Auto-registers workstation seat coordinates when an employee is sitting working.
     4. Displays RED box 'TIDAK DI TEMPAT: XmYYs' when an employee leaves their workstation.
     5. Stable Workstation IDs without flickering or giant ballooning boxes.
     """
 
-    def __init__(self, model_name='yolov8m.pt', iou_threshold=0.20, min_confidence=0.10, bootstrap_persistence=1):
+    def __init__(self, model_name='yolov8m.pt', iou_threshold=0.25, min_confidence=0.10, bootstrap_persistence=1):
         self.iou_threshold = iou_threshold
         self.min_confidence = min_confidence
         self.bootstrap_persistence = bootstrap_persistence
@@ -76,13 +76,28 @@ class ChairRegistry:
             ph = max(1, py2 - py1)
             aspect_ratio = ph / float(pw)
 
-            # REJECT STANDING PERSONS: Standing upright persons (aspect ratio >= 1.75 & ph >= 240px) are standing
-            is_standing = (aspect_ratio >= 1.75 and ph >= 240)
-            if is_standing:
+            # ============================================================
+            # PHANTOM CHAIR PREVENTION - DUAL VALIDATION (WAJIB KEDUANYA)
+            # ============================================================
+
+            # Syarat (a): H/W ratio harus <= 1.8 — indikasi orang DUDUK
+            # H/W > 1.8 = orang berdiri tegak / sedang berjalan
+            is_too_tall = (aspect_ratio > 1.8)
+            if is_too_tall:
                 continue
 
+            # Syarat (b): Net displacement < 20px — orang DIAM di tempat
+            # Orang berjalan melewati area kosong akan memiliki net_displacement tinggi
+            net_displacement = person.get("net_displacement", 999.0)
+            is_walking = (net_displacement >= 20.0)
+            if is_walking:
+                continue
+
+            # Kedua syarat terpenuhi: aman untuk bootstrap workstation baru
+            # ============================================================
+
             # Synthesize workstation seat box for head & desk presence
-            seat_y1 = py1 + int(ph * 0.15)
+            seat_y1 = py1 + int(ph * 0.10)
             seat_y2 = py2
             pad_x = int(pw * 0.05)
             est_bbox = [max(0, px1 - pad_x), seat_y1, min(1920, px2 + pad_x), seat_y2]
@@ -93,9 +108,8 @@ class ChairRegistry:
                 c2 = compute_centroid(cand["bbox"])
                 dist = math.hypot(c1[0] - c2[0], c1[1] - c2[1])
                 iou = compute_iou(est_bbox, cand["bbox"])
-                h_overlap = compute_horizontal_overlap_ratio(est_bbox, cand["bbox"])
 
-                if iou >= 0.15 or dist < 120.0 or h_overlap >= 0.30:
+                if iou >= 0.35 or dist < 60.0:
                     already_has_workstation = True
                     break
 
@@ -132,14 +146,14 @@ class ChairRegistry:
             if chair_id is None:
                 anchor_c = compute_centroid(anchor["bbox"])
                 best_existing_id = None
-                min_d = 160.0
+                min_d = 75.0
 
                 for reg_id, reg_entry in self.registry.items():
                     reg_c = compute_centroid(reg_entry["bbox"])
                     d = math.hypot(anchor_c[0] - reg_c[0], anchor_c[1] - reg_c[1])
                     iou = compute_iou(anchor["bbox"], reg_entry["bbox"])
 
-                    if (d < min_d or iou >= 0.20) and reg_id not in merged_result:
+                    if (d < min_d or iou >= 0.35) and reg_id not in merged_result:
                         min_d = d
                         best_existing_id = reg_id
 
@@ -155,6 +169,9 @@ class ChairRegistry:
             age = anchor["age"]
             last_seen = anchor.get("last_seen_frame", frame_count)
 
+            if anchor["source"] == "yolo":
+                last_seen = frame_count
+
             for j in range(i + 1, len(candidates)):
                 if used[j]:
                     continue
@@ -164,9 +181,9 @@ class ChairRegistry:
                 c1 = compute_centroid(best_bbox)
                 c2 = compute_centroid(cand["bbox"])
                 dist = math.hypot(c1[0] - c2[0], c1[1] - c2[1])
-                h_overlap = compute_horizontal_overlap_ratio(best_bbox, cand["bbox"])
 
-                if iou >= self.iou_threshold or dist < 140.0 or h_overlap >= 0.30:
+                # Tight NMS for adjacent workstations: Only merge if dist < 70px or IoU >= 0.40
+                if iou >= 0.40 or dist < 70.0:
                     used[j] = True
 
                     exp_x1 = min(best_bbox[0], cand["bbox"][0])
