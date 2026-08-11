@@ -121,7 +121,7 @@ def main():
         output_frame = visualizer.render(frame, registered_chairs, rule_engine, fps=fps)
 
         # Save frame snapshot if requested
-        if args.save_frames_dir and (frame_count % 25 == 0 or frame_count == 1):
+        if args.save_frames_dir and (frame_count % 5 == 0 or frame_count == 1):
             snap_path = os.path.join(args.save_frames_dir, f"frame_{frame_count:04d}.jpg")
             cv2.imwrite(snap_path, output_frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
 

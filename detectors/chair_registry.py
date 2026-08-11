@@ -2,16 +2,48 @@ import math
 import numpy as np
 from tracker import compute_iou, compute_centroid
 
+def compute_x_overlap_ratio(bbox1, bbox2):
+    x1 = max(bbox1[0], bbox2[0])
+    x2 = min(bbox1[2], bbox2[2])
+    inter_x = max(0, x2 - x1)
+    w1 = max(1, bbox1[2] - bbox1[0])
+    w2 = max(1, bbox2[2] - bbox2[0])
+    min_w = min(w1, w2)
+    return inter_x / float(min_w)
+
+def is_same_workstation(bbox1, bbox2, dynamic_dist=180.0, dynamic_iou=0.10):
+    """
+    Generalizable matching function to determine if two bounding boxes belong to the same workstation.
+    Handles size/position variations during employee stand-up transitions.
+    """
+    iou = compute_iou(bbox1, bbox2)
+    if iou >= dynamic_iou:
+        return True
+
+    c1 = compute_centroid(bbox1)
+    c2 = compute_centroid(bbox2)
+    dist = math.hypot(c1[0] - c2[0], c1[1] - c2[1])
+    if dist < dynamic_dist:
+        return True
+
+    # Horizontal desk overlap + vertical proximity check for shifting chair boxes
+    x_overlap = compute_x_overlap_ratio(bbox1, bbox2)
+    dy = abs(c1[1] - c2[1])
+    if x_overlap >= 0.25 and dy < 160.0:
+        return True
+
+    return False
+
+
 class ChairRegistry:
     """
-    Automatic Workstation & Chair Registry.
-    Tracks workstations continuously and generalizably across any CCTV video.
+    Automatic Workstation & Chair Registry with Dynamic Transition Merge & Cooldown Verification.
 
     Guarantees:
-    1. Zero Phantom Chairs: Hallway walkers or people pausing briefly do NOT leave fake red boxes.
-    2. Zero Duplicate Overlaps: Merges overlapping seat candidates (IoU >= 0.20 or dist < 110px).
-    3. Occlusion Resistance: Keeps workstation registered when employee is seated working.
-    4. Permanent Workstations: Confirmed workstations remain registered when employee leaves.
+    1. Zero Duplicate Boxes on Stand-Up Transition: Merges varying YOLO chair bboxes when employee stands up.
+    2. Confirmation Cooldown: New physical chair detections undergo 4-frame verification before display.
+    3. Zero Phantom Chairs: Hallway walkers or brief pauses do NOT create fake workstations.
+    4. Occlusion Resistance: Keeps workstation registered when employee is seated working.
     """
 
     def __init__(self, model_name='yolov8m.pt', iou_threshold=0.20, min_confidence=0.15, bootstrap_persistence=15):
@@ -34,6 +66,7 @@ class ChairRegistry:
                 "is_bootstrap": entry.get("is_bootstrap", False),
                 "confirmed_by_chair": entry.get("confirmed_by_chair", False),
                 "occupied_frames": entry.get("occupied_frames", 0),
+                "confirmed_frames": entry.get("confirmed_frames", 1),
                 "source": "registry",
                 "priority": 2
             })
@@ -54,26 +87,30 @@ class ChairRegistry:
                     "is_bootstrap": False,
                     "confirmed_by_chair": True,
                     "occupied_frames": 0,
+                    "confirmed_frames": 1,
                     "source": "yolo",
                     "priority": 1
                 })
 
-        # 2. Global Deduplication & NMS with Bulletproof Workstation ID Matching
+        # 2. Global Deduplication & NMS with Dynamic Merge Thresholds
         clean_chairs = self._global_nms_merge(all_candidates, frame_count)
 
-        # 3. Filter out transient unconfirmed bootstrap entries that were only occupied briefly
+        # 3. Confirmation Cooldown Filter for new detections
         final_registry = {}
         for cid, entry in clean_chairs.items():
-            is_bootstrap = entry.get("is_bootstrap", False)
-            confirmed = entry.get("confirmed_by_chair", False)
             occupied_frames = entry.get("occupied_frames", 0)
             status = entry.get("status", "TIDAK DI TEMPAT")
 
-            # A workstation is permanent if it was confirmed by a physical YOLO chair OR if someone sat there >= 45 frames (~1.5s)
-            if confirmed or occupied_frames >= 45:
-                entry["confirmed_by_chair"] = True
-                final_registry[cid] = entry
-            elif status == "BEKERJA" or is_bootstrap:
+            # Update confirmed frames counter if seen across consecutive frames
+            prev_confirmed = self.registry[cid].get("confirmed_frames", 0) if cid in self.registry else 0
+            confirmed_frames = prev_confirmed + 1
+            entry["confirmed_frames"] = confirmed_frames
+
+            # Display Conditions:
+            # 1. Active BEKERJA status (person is currently seated) -> Display immediately!
+            # 2. Previously occupied workstation (sat >= 30 frames ~ 1s) -> Permanent, display immediately!
+            # 3. Newly detected physical chair verified across 4+ consecutive frames -> Display!
+            if status == "BEKERJA" or occupied_frames >= 30 or confirmed_frames >= 4:
                 final_registry[cid] = entry
 
         self.registry = final_registry
@@ -107,13 +144,7 @@ class ChairRegistry:
             # Check if this person already maps to an existing workstation candidate or registry entry
             already_has_workstation = False
             for cand in existing_candidates:
-                c1 = compute_centroid(est_bbox)
-                c2 = compute_centroid(cand["bbox"])
-                dist = math.hypot(c1[0] - c2[0], c1[1] - c2[1])
-                iou = compute_iou(est_bbox, cand["bbox"])
-
-                # Deduplication threshold: dist < 110px or IoU >= 0.20
-                if iou >= 0.20 or dist < 110.0:
+                if is_same_workstation(est_bbox, cand["bbox"], dynamic_dist=180.0, dynamic_iou=0.10):
                     already_has_workstation = True
                     break
 
@@ -126,6 +157,7 @@ class ChairRegistry:
                     "is_bootstrap": True,
                     "confirmed_by_chair": False,
                     "occupied_frames": 1,
+                    "confirmed_frames": 1,
                     "source": "presence",
                     "priority": 3  # Highest priority for active seated human presence
                 })
@@ -149,34 +181,31 @@ class ChairRegistry:
             anchor = candidates[i]
             used[i] = True
 
-            anchor_c = compute_centroid(anchor["bbox"])
             chair_id = anchor["id"]
 
-            # Step A: Match candidate against existing registry entries OR already merged_result entries
+            # Dynamic Merge Thresholds: Relax threshold for young entries (< 20 frames) or recent stand-up transitions
+            anchor_age = anchor.get("age", 0)
+            is_transitioning = (anchor_age < 20 or anchor.get("occupied_frames", 0) > 0)
+            dyn_dist = 180.0 if is_transitioning else 130.0
+            dyn_iou = 0.10 if is_transitioning else 0.18
+
+            # Step A: Match candidate against already merged entries OR existing registry entries
             if chair_id is None:
                 best_match_id = None
-                min_d = 120.0
+                min_d = dyn_dist
 
-                # 1. First check against ALREADY MERGED entries in current frame
+                # 1. Check against ALREADY MERGED entries in current frame
                 for m_id, m_entry in merged_result.items():
-                    m_c = compute_centroid(m_entry["bbox"])
-                    d = math.hypot(anchor_c[0] - m_c[0], anchor_c[1] - m_c[1])
-                    iou = compute_iou(anchor["bbox"], m_entry["bbox"])
-
-                    if iou >= 0.20 or d < min_d:
-                        min_d = d
+                    if is_same_workstation(anchor["bbox"], m_entry["bbox"], dynamic_dist=dyn_dist, dynamic_iou=dyn_iou):
                         best_match_id = m_id
+                        break
 
-                # 2. Then check against self.registry if not matched yet
+                # 2. Check against self.registry if not matched yet
                 if best_match_id is None:
                     for reg_id, reg_entry in self.registry.items():
-                        reg_c = compute_centroid(reg_entry["bbox"])
-                        d = math.hypot(anchor_c[0] - reg_c[0], anchor_c[1] - reg_c[1])
-                        iou = compute_iou(anchor["bbox"], reg_entry["bbox"])
-
-                        if iou >= 0.20 or d < min_d:
-                            min_d = d
+                        if is_same_workstation(anchor["bbox"], reg_entry["bbox"], dynamic_dist=dyn_dist, dynamic_iou=dyn_iou):
                             best_match_id = reg_id
+                            break
 
                 if best_match_id is not None:
                     chair_id = best_match_id
@@ -184,7 +213,7 @@ class ChairRegistry:
                     chair_id = self.next_chair_id
                     self.next_chair_id += 1
 
-            # Step B: If chair_id is already in merged_result, merge candidate into that existing entry!
+            # Step B: If chair_id is already in merged_result, merge candidate into existing entry!
             if chair_id in merged_result:
                 existing = merged_result[chair_id]
                 if anchor.get("confirmed_by_chair"):
@@ -204,18 +233,13 @@ class ChairRegistry:
             age = anchor["age"]
             last_seen = frame_count if anchor["source"] in ["yolo", "presence"] else anchor.get("last_seen_frame", frame_count)
 
-            # Merge any remaining overlapping candidate boxes in the candidate list
+            # Merge any remaining overlapping candidate boxes in candidate list
             for j in range(i + 1, len(candidates)):
                 if used[j]:
                     continue
 
                 cand = candidates[j]
-                iou = compute_iou(best_bbox, cand["bbox"])
-                c1 = compute_centroid(best_bbox)
-                c2 = compute_centroid(cand["bbox"])
-                dist = math.hypot(c1[0] - c2[0], c1[1] - c2[1])
-
-                if iou >= 0.20 or dist < 110.0:
+                if is_same_workstation(best_bbox, cand["bbox"], dynamic_dist=dyn_dist, dynamic_iou=dyn_iou):
                     used[j] = True
                     if cand.get("confirmed_by_chair"):
                         confirmed = True
