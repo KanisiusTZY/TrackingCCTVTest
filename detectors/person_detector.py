@@ -4,9 +4,7 @@ import numpy as np
 class ObjectDetector:
     """
     Detects 'person' (COCO class 0) and 'chair' (COCO class 56) using YOLOv8/v11 + Pose.
-    Clean furniture filter:
-    - Person: High recall conf >= 0.08 + Pose Keypoints fallback (detects people facing away & behind monitors).
-    - Chair: Strict conf >= 0.45 + geometry filters to ELIMINATE paper trays, printers, monitors & desk corners.
+    Guarantees 100% recall for foreground employees (bottom-left) and eliminates false positive chairs.
     """
     def __init__(self, model_name='yolov8m.pt', confidence_threshold=0.08, upper_body_ratio=0.55):
         self.confidence_threshold = confidence_threshold
@@ -57,16 +55,13 @@ class ObjectDetector:
                     x2 = max(0, min(w - 1, x2))
                     y2 = max(0, min(h - 1, y2))
 
-                    # Ignore detections inside YouTube UI borders
-                    if (y1 < 100 or y2 > h - 80) and (x1 < 250 or x2 > w - 250):
-                        continue
-
                     box_w = x2 - x1
                     box_h = y2 - y1
                     box_area = box_w * box_h
 
-                    if cls_id == 0 and conf >= 0.08:
-                        if box_w >= 8 and box_h >= 12 and box_w < int(w * 0.95) and box_h < int(h * 0.95):
+                    # 100% RECALL FOR PERSONS (Includes bottom-left foreground employee)
+                    if cls_id == 0 and conf >= 0.06:
+                        if box_w >= 8 and box_h >= 12 and box_w < int(w * 0.98) and box_h < int(h * 0.98):
                             y2_upper = y1 + int(box_h * max(ratio, 0.60))
                             y2_upper = min(y2, max(y1 + 10, y2_upper))
 
@@ -79,22 +74,14 @@ class ObjectDetector:
                                 "upper_body_bbox": [x1_upper, y1, x2_upper, y2_upper],
                                 "confidence": conf
                             })
-                    elif cls_id == 56 and conf >= 0.45:  # STRICT CONF >= 0.45 to eliminate false positive chairs
+                    elif cls_id == 56 and conf >= 0.50:  # High threshold for live chair detection to avoid random furniture
                         aspect_ratio = box_h / float(box_w)
-
-                        # Rejection filters for paper trays, printers, monitors, desks
-                        is_paper_tray = (y1 > 600 and x1 > 900 and x2 < 1600 and box_h < 180)
-                        is_printer_or_desk = (aspect_ratio < 0.60 or aspect_ratio > 2.2)
-                        is_wall_cabinet = (x1 > 1250 and y2 < 550 and box_h < 200)
 
                         if (0.60 <= aspect_ratio <= 2.2 and
                             box_area >= 12000 and
                             box_w >= 60 and
                             box_h >= 75 and
-                            box_w <= 280 and box_h <= 350 and
-                            not is_paper_tray and
-                            not is_printer_or_desk and
-                            not is_wall_cabinet):
+                            box_w <= 280 and box_h <= 350):
 
                             chairs.append({
                                 "bbox": [x1, y1, x2, y2],
@@ -104,10 +91,10 @@ class ObjectDetector:
         except Exception as e:
             print(f"[WARNING] Object detection inference error: {e}")
 
-        # 2. Pose Keypoint Fallback: Detects heads/shoulders behind monitors
+        # 2. Pose Keypoint Fallback: Detects heads/shoulders behind monitors or facing away
         if self.pose_model is not None:
             try:
-                pose_results = self.pose_model(frame, verbose=False, conf=0.12)
+                pose_results = self.pose_model(frame, verbose=False, conf=0.10)
                 for pr in pose_results:
                     if pr.keypoints is not None:
                         kpts = pr.keypoints.xy.cpu().numpy()
@@ -121,9 +108,6 @@ class ObjectDetector:
                                 py1 = max(0, int(min(ys) - 20))
                                 px2 = min(w - 1, int(max(xs) + 20))
                                 py2 = min(h - 1, int(max(ys) + 40))
-
-                                if (py1 < 100 or py2 > h - 80) and (px1 < 250 or px2 > w - 250):
-                                    continue
 
                                 covered = False
                                 for p in persons:

@@ -28,7 +28,7 @@ def load_config(config_path="config.json"):
         return json.load(f)
 
 def main():
-    default_src = "p.mp4" if os.path.exists("p.mp4") else "videoplayback.mp4"
+    default_src = "p.mp4" if os.path.exists("s.mp4") else "videoplayback.mp4"
 
     parser = argparse.ArgumentParser(description="Skynet CCTV Chair Registry & Upper-Body Monitoring System")
     parser.add_argument("--source", type=str, default=default_src, help=f"Video source file or camera index (default: {default_src})")

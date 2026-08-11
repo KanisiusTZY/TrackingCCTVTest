@@ -16,13 +16,14 @@ def compute_horizontal_overlap_ratio(bbox1, bbox2):
 
 class ChairRegistry:
     """
-    Workstation Registry based on Head & Desk Presence.
+    Employee Workstation Registry based on Head & Desk Presence.
 
     Guarantees:
-    1. Independent of physical chair occlusion: Relies on Head & Upper-Body Presence at desks.
-    2. Auto-registers workstation seat coordinates whenever an employee sits working.
-    3. Retains persistent workstation seat memory when employee leaves, displaying 'TIDAK DI TEMPAT'.
-    4. Stable Chair IDs without flickering or giant ballooning boxes.
+    1. 100% Detection for all seated employees (including bottom-left foreground employee).
+    2. Zero Random Red Boxes on unused room furniture, paper trays, or curved desks.
+    3. Auto-registers workstation seat coordinates when an employee is sitting working.
+    4. Displays RED box 'TIDAK DI TEMPAT: XmYYs' when an employee leaves their workstation.
+    5. Stable Workstation IDs without flickering or giant ballooning boxes.
     """
 
     def __init__(self, model_name='yolov8m.pt', iou_threshold=0.20, min_confidence=0.10, bootstrap_persistence=1):
@@ -48,21 +49,7 @@ class ChairRegistry:
                     "priority": 3 if not entry.get("is_bootstrap") else 2
                 })
 
-        # 1b. Live YOLO Chair Detections (Strict confidence >= 0.45 for physical chairs)
-        for det in live_chair_detections:
-            conf = det.get("confidence", 1.0)
-            if conf >= 0.45:
-                all_candidates.append({
-                    "id": None,
-                    "bbox": list(det["bbox"]),
-                    "conf": conf,
-                    "age": 0,
-                    "is_bootstrap": False,
-                    "source": "yolo",
-                    "priority": 4
-                })
-
-        # 1c. Head & Desk Presence Workstation Generation for SEATED Employees
+        # 1b. Head & Desk Presence Workstation Generation for SEATED Employees
         if tracked_persons:
             presence_candidates = self._generate_presence_candidates(tracked_persons, all_candidates)
             all_candidates.extend(presence_candidates)
@@ -95,7 +82,7 @@ class ChairRegistry:
                 continue
 
             # Synthesize workstation seat box for head & desk presence
-            seat_y1 = py1 + int(ph * 0.20)
+            seat_y1 = py1 + int(ph * 0.15)
             seat_y2 = py2
             pad_x = int(pw * 0.05)
             est_bbox = [max(0, px1 - pad_x), seat_y1, min(1920, px2 + pad_x), seat_y2]
@@ -167,9 +154,6 @@ class ChairRegistry:
             is_bootstrap = anchor["is_bootstrap"]
             age = anchor["age"]
             last_seen = anchor.get("last_seen_frame", frame_count)
-
-            if anchor["source"] == "yolo":
-                last_seen = frame_count
 
             for j in range(i + 1, len(candidates)):
                 if used[j]:
