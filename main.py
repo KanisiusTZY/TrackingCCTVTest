@@ -37,7 +37,7 @@ def main():
     parser.add_argument("--display-width", type=int, default=1280, help="Display window max width in pixels (default: 1280)")
     parser.add_argument("--headless", action="store_true", help="Run without rendering GUI display window")
     parser.add_argument("--max-frames", type=int, default=0, help="Stop after processing max frames (0 = unlimited)")
-    parser.add_argument("--model", type=str, default="yolov8m.pt", help="YOLO model variant (e.g. yolov8m.pt, yolov8x.pt, yolo11m.pt) (default: yolov8m.pt)")
+    parser.add_argument("--model", type=str, default="yolov8n.pt", help="YOLO model variant (e.g. yolov8n.pt, yolov8x.pt, yolo11m.pt) (default: yolov8m.pt)")
     args = parser.parse_args()
 
     # Load configuration
