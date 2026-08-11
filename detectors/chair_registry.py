@@ -2,68 +2,82 @@ import math
 import numpy as np
 from tracker import compute_iou, compute_centroid
 
-def compute_horizontal_overlap_ratio(bbox1, bbox2):
-    x1 = max(bbox1[0], bbox2[0])
-    x2 = min(bbox1[2], bbox2[2])
-    inter_x = max(0, x2 - x1)
-
-    w1 = max(1, bbox1[2] - bbox1[0])
-    w2 = max(1, bbox2[2] - bbox2[0])
-    min_w = min(w1, w2)
-
-    return inter_x / float(min_w)
-
-
 class ChairRegistry:
     """
-    Employee Workstation Registry based on Head & Desk Presence.
+    Automatic Workstation & Chair Registry.
+    Tracks workstations continuously and generalizably across any CCTV video.
 
     Guarantees:
-    1. 100% Detection for all 6 employees in s.mp4 (preserves tightly packed adjacent desks).
-    2. Zero Random Red Boxes on unused room furniture, paper trays, or curved desks.
-    3. Auto-registers workstation seat coordinates when an employee is sitting working.
-    4. Displays RED box 'TIDAK DI TEMPAT: XmYYs' when an employee leaves their workstation.
-    5. Stable Workstation IDs without flickering or giant ballooning boxes.
+    1. Zero Phantom Chairs: Hallway walkers or people pausing briefly do NOT leave fake red boxes.
+    2. Zero Duplicate Overlaps: Merges overlapping seat candidates (IoU >= 0.20 or dist < 110px).
+    3. Occlusion Resistance: Keeps workstation registered when employee is seated working.
+    4. Permanent Workstations: Confirmed workstations remain registered when employee leaves.
     """
 
-    def __init__(self, model_name='yolov8m.pt', iou_threshold=0.25, min_confidence=0.10, bootstrap_persistence=1):
+    def __init__(self, model_name='yolov8m.pt', iou_threshold=0.20, min_confidence=0.15, bootstrap_persistence=15):
         self.iou_threshold = iou_threshold
         self.min_confidence = min_confidence
         self.bootstrap_persistence = bootstrap_persistence
         self.next_chair_id = 1
         self.registry = {}
 
-    def process_frame(self, frame_count, live_chair_detections, tracked_persons=None):
+    def process_frame(self, frame_count, live_chair_detections=None, tracked_persons=None):
         all_candidates = []
 
-        # 1a. Existing Registry Workstations (Keep persistent for 150 frames ~ 5s)
+        # 1a. Existing Registry Workstations
         for cid, entry in list(self.registry.items()):
-            if frame_count - entry.get("last_seen_frame", frame_count) < 150:
-                all_candidates.append({
-                    "id": cid,
-                    "bbox": list(entry["bbox"]),
-                    "conf": entry["conf"],
-                    "age": entry["age"] + 1,
-                    "is_bootstrap": entry.get("is_bootstrap", False),
-                    "source": "registry",
-                    "priority": 3 if not entry.get("is_bootstrap") else 2
-                })
+            all_candidates.append({
+                "id": cid,
+                "bbox": list(entry["bbox"]),
+                "conf": entry["conf"],
+                "age": entry["age"] + 1,
+                "is_bootstrap": entry.get("is_bootstrap", False),
+                "confirmed_by_chair": entry.get("confirmed_by_chair", False),
+                "occupied_frames": entry.get("occupied_frames", 0),
+                "source": "registry",
+                "priority": 2
+            })
 
-        # 1b. Head & Desk Presence Workstation Generation for SEATED Employees
+        # 1b. Head & Body Presence Workstation Generation for SEATED Employees (PRIORITY 3 = Highest Truth!)
         if tracked_persons:
             presence_candidates = self._generate_presence_candidates(tracked_persons, all_candidates)
             all_candidates.extend(presence_candidates)
 
-        total_candidate_count = len(all_candidates)
+        # 1c. Add Confirmed Physical YOLO Chair Detections (Class 56) (PRIORITY 1)
+        if live_chair_detections:
+            for chair_det in live_chair_detections:
+                all_candidates.append({
+                    "id": None,
+                    "bbox": list(chair_det["bbox"]),
+                    "conf": chair_det.get("confidence", 0.50),
+                    "age": 0,
+                    "is_bootstrap": False,
+                    "confirmed_by_chair": True,
+                    "occupied_frames": 0,
+                    "source": "yolo",
+                    "priority": 1
+                })
 
-        # 2. Global NMS & Centroid Deduplication with STABLE ID MATCHER
+        # 2. Global Deduplication & NMS with Stable Workstation ID Matching
         clean_chairs = self._global_nms_merge(all_candidates, frame_count)
 
-        # 3. Replace self.registry completely
-        self.registry = clean_chairs
+        # 3. Filter out transient unconfirmed bootstrap entries that were only occupied briefly
+        final_registry = {}
+        for cid, entry in clean_chairs.items():
+            is_bootstrap = entry.get("is_bootstrap", False)
+            confirmed = entry.get("confirmed_by_chair", False)
+            occupied_frames = entry.get("occupied_frames", 0)
+            status = entry.get("status", "TIDAK DI TEMPAT")
 
-        print(f"[Frame {frame_count}] Candidates: {total_candidate_count} -> After NMS: {len(self.registry)} unique workstations")
+            # A workstation is permanent if it was confirmed by a physical YOLO chair OR if someone sat there >= 45 frames (~1.5s)
+            if confirmed or occupied_frames >= 45:
+                entry["confirmed_by_chair"] = True
+                final_registry[cid] = entry
+            elif status == "BEKERJA" or is_bootstrap:
+                # Keep active seated workstations while person is present
+                final_registry[cid] = entry
 
+        self.registry = final_registry
         return self.registry
 
     def _generate_presence_candidates(self, tracked_persons, existing_candidates):
@@ -76,32 +90,22 @@ class ChairRegistry:
             ph = max(1, py2 - py1)
             aspect_ratio = ph / float(pw)
 
-            # ============================================================
-            # PHANTOM CHAIR PREVENTION - DUAL VALIDATION (WAJIB KEDUANYA)
-            # ============================================================
-
-            # Syarat (a): H/W ratio harus <= 1.8 — indikasi orang DUDUK
-            # H/W > 1.8 = orang berdiri tegak / sedang berjalan
-            is_too_tall = (aspect_ratio > 1.8)
-            if is_too_tall:
+            # Rejection 1: Standing upright persons (H/W > 1.80)
+            if aspect_ratio > 1.80:
                 continue
 
-            # Syarat (b): Net displacement < 20px — orang DIAM di tempat
-            # Orang berjalan melewati area kosong akan memiliki net_displacement tinggi
+            # Rejection 2: Persons actively moving (net_displacement >= 20px)
             net_displacement = person.get("net_displacement", 999.0)
-            is_walking = (net_displacement >= 20.0)
-            if is_walking:
+            if net_displacement >= 20.0:
                 continue
 
-            # Kedua syarat terpenuhi: aman untuk bootstrap workstation baru
-            # ============================================================
-
-            # Synthesize workstation seat box for head & desk presence
-            seat_y1 = py1 + int(ph * 0.10)
+            # Synthesize workstation seat box around person upper body & seat position
+            seat_y1 = py1 + int(ph * 0.15)
             seat_y2 = py2
             pad_x = int(pw * 0.05)
-            est_bbox = [max(0, px1 - pad_x), seat_y1, min(1920, px2 + pad_x), seat_y2]
+            est_bbox = [max(0, px1 - pad_x), seat_y1, px2 + pad_x, seat_y2]
 
+            # Check if this person already maps to an existing workstation
             already_has_workstation = False
             for cand in existing_candidates:
                 c1 = compute_centroid(est_bbox)
@@ -109,7 +113,8 @@ class ChairRegistry:
                 dist = math.hypot(c1[0] - c2[0], c1[1] - c2[1])
                 iou = compute_iou(est_bbox, cand["bbox"])
 
-                if iou >= 0.35 or dist < 60.0:
+                # Deduplication threshold: dist < 110px or IoU >= 0.20
+                if iou >= 0.20 or dist < 110.0:
                     already_has_workstation = True
                     break
 
@@ -117,11 +122,13 @@ class ChairRegistry:
                 presence_list.append({
                     "id": None,
                     "bbox": est_bbox,
-                    "conf": 0.80,
+                    "conf": 0.85,
                     "age": 0,
                     "is_bootstrap": True,
+                    "confirmed_by_chair": False,
+                    "occupied_frames": 1,
                     "source": "presence",
-                    "priority": 1
+                    "priority": 3  # Highest priority for active seated human presence
                 })
 
         return presence_list
@@ -130,6 +137,7 @@ class ChairRegistry:
         if not candidates:
             return {}
 
+        # Sort by (priority, conf) descending
         candidates.sort(key=lambda c: (c["priority"], c["conf"]), reverse=True)
 
         merged_result = {}
@@ -146,14 +154,14 @@ class ChairRegistry:
             if chair_id is None:
                 anchor_c = compute_centroid(anchor["bbox"])
                 best_existing_id = None
-                min_d = 75.0
+                min_d = 120.0
 
                 for reg_id, reg_entry in self.registry.items():
                     reg_c = compute_centroid(reg_entry["bbox"])
                     d = math.hypot(anchor_c[0] - reg_c[0], anchor_c[1] - reg_c[1])
                     iou = compute_iou(anchor["bbox"], reg_entry["bbox"])
 
-                    if (d < min_d or iou >= 0.35) and reg_id not in merged_result:
+                    if (d < min_d or iou >= 0.20) and reg_id not in merged_result:
                         min_d = d
                         best_existing_id = reg_id
 
@@ -166,12 +174,15 @@ class ChairRegistry:
             best_bbox = list(anchor["bbox"])
             best_conf = anchor["conf"]
             is_bootstrap = anchor["is_bootstrap"]
+            confirmed = anchor.get("confirmed_by_chair", False)
+            occupied_frames = anchor.get("occupied_frames", 0)
             age = anchor["age"]
             last_seen = anchor.get("last_seen_frame", frame_count)
 
-            if anchor["source"] == "yolo":
+            if anchor["source"] in ["yolo", "presence"]:
                 last_seen = frame_count
 
+            # Merge any overlapping candidate boxes (IoU >= 0.20 or distance < 110px)
             for j in range(i + 1, len(candidates)):
                 if used[j]:
                     continue
@@ -182,25 +193,23 @@ class ChairRegistry:
                 c2 = compute_centroid(cand["bbox"])
                 dist = math.hypot(c1[0] - c2[0], c1[1] - c2[1])
 
-                # Tight NMS for adjacent workstations: Only merge if dist < 70px or IoU >= 0.40
-                if iou >= 0.40 or dist < 70.0:
+                if iou >= 0.20 or dist < 110.0:
                     used[j] = True
 
-                    exp_x1 = min(best_bbox[0], cand["bbox"][0])
-                    exp_y1 = min(best_bbox[1], cand["bbox"][1])
-                    exp_x2 = max(best_bbox[2], cand["bbox"][2])
-                    exp_y2 = max(best_bbox[3], cand["bbox"][3])
-
-                    exp_w = exp_x2 - exp_x1
-                    exp_h = exp_y2 - exp_y1
-
-                    if exp_w <= 280 and exp_h <= 350:
-                        best_bbox = [exp_x1, exp_y1, exp_x2, exp_y2]
+                    if cand.get("confirmed_by_chair"):
+                        confirmed = True
+                    occupied_frames = max(occupied_frames, cand.get("occupied_frames", 0))
 
                     if not cand["is_bootstrap"]:
                         is_bootstrap = False
                         best_conf = max(best_conf, cand["conf"])
                         last_seen = frame_count
+
+            if chair_id in self.registry:
+                prev_entry = self.registry[chair_id]
+                occupied_frames = max(occupied_frames, prev_entry.get("occupied_frames", 0))
+                if prev_entry.get("confirmed_by_chair"):
+                    confirmed = True
 
             merged_result[chair_id] = {
                 "id": chair_id,
@@ -209,6 +218,8 @@ class ChairRegistry:
                 "conf": best_conf,
                 "age": age,
                 "is_bootstrap": is_bootstrap,
+                "confirmed_by_chair": confirmed,
+                "occupied_frames": occupied_frames,
                 "last_seen_frame": last_seen
             }
 

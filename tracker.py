@@ -31,8 +31,7 @@ def compute_centroid(bbox):
 class PersonTracker:
     """
     Centroid & IoU Multi-Object Tracker for Persons.
-    Matches person full-body bboxes for persistent person_id tracking.
-    Propagates upper_body_bbox for IoU matching against ChairRegistry.
+    Tracks persistent person state, centroid history, displacement, and stationary frames count.
     """
     def __init__(self, max_disappeared=30, min_distance_px=200):
         self.next_id = 1
@@ -53,7 +52,9 @@ class PersonTracker:
             "upper_body_bbox": detection.get("upper_body_bbox", bbox),
             "centroid": centroid,
             "confidence": detection.get("confidence", 1.0),
-            "net_displacement": 0.0,  # Net distance from first observed position
+            "net_displacement": 0.0,
+            "tracked_frames": 1,
+            "stationary_frames": 0,
         }
 
         self.objects[self.next_id] = obj_data
@@ -70,9 +71,6 @@ class PersonTracker:
             del self.centroid_history[object_id]
 
     def update(self, person_detections):
-        """
-        person_detections: list of dicts [{"bbox": [...], "upper_body_bbox": [...], "confidence": ...}]
-        """
         if len(self.objects) == 0:
             for det in person_detections:
                 self.register(det)
@@ -123,6 +121,7 @@ class PersonTracker:
             new_centroid = compute_centroid(smoothed_bbox)
             self.objects[object_id]["centroid"] = new_centroid
             self.objects[object_id]["confidence"] = det.get("confidence", 1.0)
+            self.objects[object_id]["tracked_frames"] += 1
             self.disappeared[object_id] = 0
 
             # Update centroid history for net displacement calculation
@@ -132,14 +131,19 @@ class PersonTracker:
                 history = history[-self.HISTORY_LEN:]
             self.centroid_history[object_id] = history
 
-            # Net displacement = distance between oldest and newest centroid in history
             if len(history) >= 2:
                 oldest = history[0]
                 newest = history[-1]
                 net_disp = math.hypot(newest[0] - oldest[0], newest[1] - oldest[1])
             else:
                 net_disp = 0.0
+
             self.objects[object_id]["net_displacement"] = net_disp
+
+            if net_disp < 15.0:
+                self.objects[object_id]["stationary_frames"] += 1
+            else:
+                self.objects[object_id]["stationary_frames"] = max(0, self.objects[object_id]["stationary_frames"] - 2)
 
             ub = det.get("upper_body_bbox", bbox)
             old_ub = self.objects[object_id].get("upper_body_bbox", ub)

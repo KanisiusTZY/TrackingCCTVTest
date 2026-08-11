@@ -72,11 +72,12 @@ class Visualizer:
             if status == "BEKERJA":
                 bekerja_count += 1
                 upper_bbox = chair.get("matched_upper_body_bbox")
-                if upper_bbox is not None:
-                    px1, py1, px2, py2 = upper_bbox
-                    # Tight green box around person upper body
-                    draw_corner_box(out, (px1, py1, px2, py2), COLOR_BEKERJA, thickness=2)
-                    draw_filled_badge(out, "BEKERJA", (px1, py1), COLOR_BEKERJA, font_scale=0.55)
+                if upper_bbox is None:
+                    upper_bbox = chair["bbox"]
+
+                px1, py1, px2, py2 = upper_bbox
+                draw_corner_box(out, (px1, py1, px2, py2), COLOR_BEKERJA, thickness=2)
+                draw_filled_badge(out, "BEKERJA", (px1, py1), COLOR_BEKERJA, font_scale=0.55)
             else:
                 away_count += 1
                 cx1, cy1, cx2, cy2 = chair["bbox"]

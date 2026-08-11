@@ -28,7 +28,7 @@ def load_config(config_path="config.json"):
         return json.load(f)
 
 def main():
-    default_src = "p.mp4" if os.path.exists("s.mp4") else "videoplayback.mp4"
+    default_src = "s.mp4" if os.path.exists("s.mp4") else "videoplayback.mp4"
 
     parser = argparse.ArgumentParser(description="Skynet CCTV Chair Registry & Upper-Body Monitoring System")
     parser.add_argument("--source", type=str, default=default_src, help=f"Video source file or camera index (default: {default_src})")
@@ -37,7 +37,8 @@ def main():
     parser.add_argument("--display-width", type=int, default=1280, help="Display window max width in pixels (default: 1280)")
     parser.add_argument("--headless", action="store_true", help="Run without rendering GUI display window")
     parser.add_argument("--max-frames", type=int, default=0, help="Stop after processing max frames (0 = unlimited)")
-    parser.add_argument("--model", type=str, default="yolov8n.pt", help="YOLO model variant (e.g. yolov8n.pt, yolov8x.pt, yolo11m.pt) (default: yolov8m.pt)")
+    parser.add_argument("--model", type=str, default="yolov8m.pt", help="YOLO model variant (e.g. yolov8n.pt, yolov8x.pt, yolo11m.pt) (default: yolov8m.pt)")
+    parser.add_argument("--save-frames-dir", type=str, default="", help="Directory to save output frame JPEG snapshots")
     args = parser.parse_args()
 
     # Load configuration
@@ -49,7 +50,7 @@ def main():
     # Initialize detection, registry & tracking components
     print("[INFO] Initializing Chair Registry & Upper-Body Monitoring System...")
     detector = ObjectDetector(model_name=args.model, confidence_threshold=0.10, upper_body_ratio=upper_body_ratio)
-    chair_registry = ChairRegistry(iou_threshold=0.30, min_confidence=0.15, bootstrap_persistence=persistence * 2)
+    chair_registry = ChairRegistry(iou_threshold=0.20, min_confidence=0.15, bootstrap_persistence=persistence)
     person_tracker = PersonTracker(max_disappeared=30)
     rule_engine = RuleEngine(config)
     visualizer = Visualizer()
@@ -74,6 +75,9 @@ def main():
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         video_writer = cv2.VideoWriter(args.output, fourcc, video_fps, (frame_w, frame_h))
         print(f"[INFO] Recording output video to '{args.output}' ({frame_w}x{frame_h} @ {video_fps:.1f} FPS)...")
+
+    if args.save_frames_dir:
+        os.makedirs(args.save_frames_dir, exist_ok=True)
 
     window_name = "Chair Registry & Upper-Body Monitoring System"
     if not args.headless:
@@ -104,7 +108,7 @@ def main():
         # Step 1: Detect persons and chairs
         detections = detector.detect(frame, upper_body_ratio=upper_body_ratio)
 
-        # Step 2: Update PersonTracker (tracked persons with full-body and upper-body bboxes)
+        # Step 2: Update PersonTracker
         tracked_persons = person_tracker.update(detections["persons"])
 
         # Step 3: Per-Frame Global Cleanup & NMS Chair Registry
@@ -116,12 +120,16 @@ def main():
         # Step 5: Render Visual HUD Overlay
         output_frame = visualizer.render(frame, registered_chairs, rule_engine, fps=fps)
 
+        # Save frame snapshot if requested
+        if args.save_frames_dir and (frame_count % 25 == 0 or frame_count == 1):
+            snap_path = os.path.join(args.save_frames_dir, f"frame_{frame_count:04d}.jpg")
+            cv2.imwrite(snap_path, output_frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
+
         # Write frame to MP4 output video file
         if video_writer is not None:
             video_writer.write(output_frame)
 
         if not args.headless:
-            # Scale frame for comfortable display without screen overflow/zoom
             fh, fw = output_frame.shape[:2]
             target_w = args.display_width
             if fw > target_w:
@@ -134,20 +142,7 @@ def main():
 
             cv2.imshow(window_name, display_render)
             key = cv2.waitKey(1) & 0xFF
-
-            if key == ord('r') or key == ord('R'):
-                print("[RESET] Resetting all away timers...")
-                for rule in rule_engine.rules.values():
-                    if hasattr(rule, "away_timers"):
-                        rule.away_timers.clear()
-                        rule.occupied_counters.clear()
-                        rule.empty_counters.clear()
-            elif key == ord('s') or key == ord('S'):
-                snap_path = f"snapshot_frame_{frame_count}.jpg"
-                cv2.imwrite(snap_path, output_frame)
-                print(f"[SNAPSHOT] Saved frame to {snap_path}")
-            elif key == ord('q') or key == ord('Q') or key == 27:
-                print("[INFO] User terminated session.")
+            if key == ord('q') or key == ord('Q') or key == 27:
                 break
 
         if args.max_frames > 0 and frame_count >= args.max_frames:
